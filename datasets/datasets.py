@@ -1,5 +1,11 @@
-"""
-Zebrafish dataset for neural prediction
+"""Load processed neural recordings for prediction.
+
+Input archives contain M (neurons by time), optional PC (components by
+time), and split-fit metadata: fit_split, fit_patch_length,
+fit_train_split, and fit_val_split. Species archives also include unit
+labels such as neuron_names or area_ids. Each dataset yields time windows
+and session metadata; the collator yields per-session input and target
+tensors.
 """
 
 __all__ = ['Zebrafish', 'ZebrafishAhrens', 'Simulation', 'Celegans', 'CelegansFlavell', 'Mice', 'get_baseline_performance']
@@ -12,11 +18,48 @@ import os
 
 from tqdm import tqdm
 from configs.configs import DatasetConfig
+from utils.split_utils import train_validation_mask
 from configs.config_global import \
     ZEBRAFISH_PROCESSED_DIR,ZEBRAFISH_AHRENS_PROCESSED_DIR, N_ZEBRAFISH_AHNRENS_SESSIONS, \
     CELEGANS_PROCESSED_DIR, N_CELEGANS_SESSIONS, CELEGANS_FLAVELL_PROCESSED_DIR, N_CELEGANS_FLAVELL_SESSIONS, \
     SIM_DIR, MICE_PROCESSED_DIR, ZEBRAFISH_BRAIN_AREAS
 from utils.data_utils import get_exp_names, get_stim_exp_names, get_mice_sessions
+
+def require_train_validation_fit(
+    data: np.lib.npyio.NpzFile,
+    filename: str,
+    config: DatasetConfig,
+) -> None:
+    """Require preprocessing fitted to this dataset's train/validation split.
+
+    Parameters
+    ----------
+    data : np.lib.npyio.NpzFile
+        Open processed recording archive.
+    filename : str
+        Absolute path to the archive.
+    config : DatasetConfig
+        Split settings used by the dataset loader.
+
+    Raises
+    ------
+    ValueError
+        If the archive was fitted on different time points.
+    """
+    expected = {
+        'fit_split': 'train_val',
+        'fit_patch_length': config.patch_length,
+        'fit_train_split': config.train_split,
+        'fit_val_split': config.val_split,
+    }
+    if any(key not in data or data[key].item() != value
+           for key, value in expected.items()):
+        raise ValueError(
+            f"Processed recording {filename} lacks preprocessing fitted "
+            "on this train/validation split. Regenerate it with the "
+            "corresponding preprocessing routine."
+        )
+
 
 class NeuralDataset(tud.Dataset):
 
@@ -81,23 +124,33 @@ class NeuralDataset(tud.Dataset):
             segments = max(1, length // patch_length)
             self.input_size.append(all_activity.shape[0])
 
-            # different normalization methods
+            fit_mask = train_validation_mask(
+                all_activity.shape[1],
+                patch_length,
+                config.train_split,
+                config.val_split,
+            )
+            fit_activity = all_activity[:, fit_mask]
             if config.normalize_mode == 'minmax':
-                Min = all_activity.min(axis=1, keepdims=True)
-                Max = all_activity.max(axis=1, keepdims=True)
+                Min = fit_activity.min(axis=1, keepdims=True)
+                Max = fit_activity.max(axis=1, keepdims=True)
                 all_activity = (all_activity - Min) / (Max - Min + 1e-4)
                 all_activity = all_activity * 2 - 1
-                assert np.all(all_activity >= -1) and np.all(all_activity <= 1)
                 self.normalize_coef.append((Max - Min).reshape(-1) / 2)
             elif config.normalize_mode == 'zscore':
-                Mean = all_activity.mean(axis=1, keepdims=True)
-                Std = all_activity.std(axis=1, keepdims=True)
+                Mean = fit_activity.mean(axis=1, keepdims=True)
+                Std = fit_activity.std(axis=1, keepdims=True)
                 all_activity = (all_activity - Mean) / (Std + 1e-4)
                 self.normalize_coef.append(Std.reshape(-1))
             elif config.normalize_mode == 'none':
                 self.normalize_coef.append(np.ones((all_activity.shape[0], )))
             else:
                 raise NotImplementedError(config.normalize_mode)
+            if not np.isfinite(all_activity).all():
+                raise ValueError(
+                    "Normalised activity contains non-finite values after "
+                    "fitting on train and validation samples."
+                )
             
             for patch in range(segments):
                 patch_start = patch * patch_length
@@ -333,6 +386,7 @@ class Zebrafish(NeuralDataset):
         unit_id = None
 
         with np.load(filename) as fishdata:
+            require_train_validation_fit(fishdata, filename, config)
             if config.pc_dim is None and config.fc_dim is None:
                 roi_indices = [fishdata[region] for region in self.all_regions]
                 
@@ -410,6 +464,7 @@ class ZebrafishAhrens(Zebrafish):
         Load the neural activity from the file
         """
         with np.load(filename) as data:
+            require_train_validation_fit(data, filename, config)
             assert config.fc_dim is None, 'Only support using PC for Ahrens data'
             if config.pc_dim is None:
                 activity: np.ndarray = data['M']
@@ -454,6 +509,7 @@ class Celegans(NeuralDataset):
         Load the neural activity from the file
         """
         with np.load(filename) as data:
+            require_train_validation_fit(data, filename, config)
             assert config.fc_dim is None, 'Only support using PC for C. elegans data'
             if config.pc_dim is None:
                 activity: np.ndarray = data['M']
@@ -510,6 +566,7 @@ class Mice(Celegans):
         Load the neural activity from the file
         """
         with np.load(filename) as data:
+            require_train_validation_fit(data, filename, config)
             assert config.fc_dim is None, 'Only support using PC for mice data'
             if config.pc_dim is None:
                 activity: np.ndarray = data['M']
@@ -569,6 +626,7 @@ class Simulation(NeuralDataset):
             filename = os.path.join(SIM_DIR, f'{name}.npz')
 
             data = np.load(filename)
+            require_train_validation_fit(data, filename, config)
             if config.pc_dim is None:
                 activity: np.ndarray = data['M']
                 n = activity.shape[0]

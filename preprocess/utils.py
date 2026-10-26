@@ -1,3 +1,13 @@
+"""Preprocess one neural recording before dataset loading.
+
+Input is a neurons-by-time activity array. process_data_matrix returns
+a dictionary for a processed NPZ archive: M holds normalised activity,
+PC holds principal-component time series when requested, and
+valid_indices marks retained neurons. fit_split and fit_* fields record
+the train/validation fit rule. Optional FC_<count> arrays hold
+cluster-averaged activity. Plot files are written under figures.
+"""
+
 import numpy as np
 import os
 
@@ -6,6 +16,8 @@ from sklearn.cluster import KMeans
 from scipy import signal
 from sklearn.decomposition import PCA
 from configs.config_global import FIG_DIR
+from configs.configs import DatasetConfig
+from utils.split_utils import train_validation_mask
 
 def bandpass(traces, f_l, f_h, sampling_freq=1):
     """
@@ -33,14 +45,49 @@ def bandpass(traces, f_l, f_h, sampling_freq=1):
     filtered = np.flip(filtered, axis=1)
     return filtered
 
-def run_pca(data, exp_name='', n_components=2048, fig_dir='preprocess'):
+def run_pca(
+    data: np.ndarray,
+    fit_mask: np.ndarray,
+    exp_name: str = '',
+    n_components: int = 2048,
+    fig_dir: str = 'preprocess',
+) -> np.ndarray:
+    """Fit PCA on train and validation samples and transform all samples.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Activity with shape ``(neurons, time)``.
+    fit_mask : np.ndarray
+        Boolean mask with shape ``(time,)``, excluding test samples.
+    exp_name : str, optional
+        Name used for the variance plot, default ''.
+    n_components : int, optional
+        Requested principal components, default 2048.
+    fig_dir : str, optional
+        Directory for the variance plot, default 'preprocess'.
+
+    Returns
+    -------
+    np.ndarray
+        Transformed activity with shape ``(components, time)``.
     """
-    data: n_neurons * T
-    return: n_components * T
-    """
-    n_components = min(n_components, data.shape[1], data.shape[0])
+    if fit_mask.shape != (data.shape[1],):
+        raise ValueError(
+            f"Expected fit mask shape {(data.shape[1],)}, "
+            f"got {fit_mask.shape}."
+        )
+    fit_data = data[:, fit_mask]
+    if not np.isfinite(fit_data).all():
+        raise ValueError("PCA fit data contains non-finite values.")
+    n_components = min(n_components, fit_data.shape[1], data.shape[0])
+    if n_components < 1:
+        raise ValueError("PCA requires at least one fit sample and neuron.")
     pca = PCA(n_components=n_components, svd_solver='full')
-    act = pca.fit_transform(data.T)
+    pca.fit(fit_data.T)
+    act = pca.transform(data.T)
+    if not np.isfinite(act).all():
+        raise ValueError("PCA transformed activity contains non-finite values.")
     print('EV 10:', pca.explained_variance_ratio_[:10])
     cumulated = np.cumsum(pca.explained_variance_ratio_)
     plots.error_plot(
@@ -126,13 +173,20 @@ def process_data_matrix(
     """
     data_dict = {}
     n, T = data.shape
+    split_config = DatasetConfig()
+    fit_mask = train_validation_mask(
+        T,
+        split_config.patch_length,
+        split_config.train_split,
+        split_config.val_split,
+    )
     sub_fig_dir = os.path.join(FIG_DIR, fig_dir, exp_name)
 
     if roi_indices is None:
         roi_indices = np.ones(n, dtype=bool)
     
     if divide_baseline:
-        baseline = np.median(data, axis=1, keepdims=True)
+        baseline = np.median(data[:, fit_mask], axis=1, keepdims=True)
         roi_indices &= baseline.reshape(-1) > 1
         data = (data - baseline) / (baseline + 1e-6)
 
@@ -162,12 +216,20 @@ def process_data_matrix(
         )
 
     if normalize_mode == 'zscore':
-        mu, std = np.mean(data, axis=1, keepdims=True), np.std(data, axis=1, keepdims=True)
+        fit_data = data[:, fit_mask]
+        mu = np.mean(fit_data, axis=1, keepdims=True)
+        std = np.std(fit_data, axis=1, keepdims=True)
         normalized = (data - mu) / (std + 1e-6)
     elif normalize_mode == 'max':
-        normalized = data / (np.max(np.abs(data), axis=1, keepdims=True) + 1e-6)
+        max_abs = np.max(np.abs(data[:, fit_mask]), axis=1, keepdims=True)
+        normalized = data / (max_abs + 1e-6)
     else:
         normalized = data
+    if not np.isfinite(normalized).all():
+        raise ValueError(
+            "Normalized activity contains non-finite values after "
+            "fitting on train and validation samples."
+        )
 
     if filter_mode == 'lowpass':
         normalized = bandpass(normalized, f_l=1e-6, f_h=0.2)
@@ -179,6 +241,10 @@ def process_data_matrix(
         assert filter_mode == 'none', f"Unknown filter mode {filter_mode}"
 
     print(f"Data shape: {data.shape}, Valid indices: {roi_indices.sum()}")
+    data_dict['fit_split'] = 'train_val'
+    data_dict['fit_patch_length'] = split_config.patch_length
+    data_dict['fit_train_split'] = split_config.train_split
+    data_dict['fit_val_split'] = split_config.val_split
     data_dict['valid_indices'] = roi_indices
     data_dict['M'] = normalized
 
@@ -186,8 +252,13 @@ def process_data_matrix(
         return data_dict
     
     normalized = normalized[roi_indices]
+    if normalized.shape[0] == 0:
+        raise ValueError("No valid neurons remain for PCA.")
     plot_delta_F(normalized, fig_dir=sub_fig_dir, exp_name=exp_name)
-    data_dict['PC'] = run_pca(normalized, fig_dir=sub_fig_dir, exp_name=exp_name, n_components=pc_dim)
+    data_dict['PC'] = run_pca(
+        normalized, fit_mask, fig_dir=sub_fig_dir,
+        exp_name=exp_name, n_components=pc_dim,
+    )
     plot_delta_F(data_dict['PC'], fig_dir=sub_fig_dir, suffix='_PC', exp_name=exp_name)
 
     # plot first 10 PCs
