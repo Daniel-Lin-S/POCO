@@ -9,14 +9,18 @@ output roots are configured in ``configs/local/paths.json``.
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import redirect_stderr, redirect_stdout
 
 from configs.ahrens_preprocess import load_ahrens_preprocess_config
+from utils.ahrens_sessions import raw_subject_directories
+from utils.campaigns.lifecycle import CampaignLog
 from preprocess.celegans import (
     celegans_flavell_preprocess, celegans_zimmer_preprocess,
 )
 from preprocess.mice import mice_preprocess
 from preprocess.zebrafish import (
-    process_zebrafish_activity, process_zebrafish_ahrens_activity,
+    PreprocessBusyError, process_zebrafish_activity,
+    process_zebrafish_ahrens_activity,
 )
 
 FILTERED_PROCESSORS = {
@@ -31,22 +35,60 @@ FILTER_CHOICES = ('none', 'lowpass', 'highpass', 'bandpass')
 def run_ahrens_campaign() -> None:
     """Process configured Ahrens filters in independent CPU workers."""
     settings = load_ahrens_preprocess_config()
+    subjects = raw_subject_directories()
+    jobs = [
+        f'{mode}:{subject.name}'
+        for mode in settings.filters
+        for subject in subjects
+    ]
+    campaign = CampaignLog.create(
+        'ahrens_preprocess', jobs,
+        metadata={
+            'filters': list(settings.filters),
+            'pca_solver': settings.pca_solver,
+            'pc_dim': settings.pc_dim,
+            'pca_seed': settings.pca_seed,
+            'storage_dtype': settings.storage_dtype,
+        },
+    )
     failures = []
-    with ProcessPoolExecutor(max_workers=len(settings.filters)) as pool:
-        futures = {
-            pool.submit(
-                process_zebrafish_ahrens_activity, mode, settings
-            ): mode
-            for mode in settings.filters
-        }
-        for future in as_completed(futures):
-            mode = futures[future]
-            try:
-                future.result()
-            except Exception as error:
-                failures.append(
-                    f'{mode}: {type(error).__name__}: {error}'
-                )
+    output = campaign.path / 'launcher.log'
+    with output.open('a', encoding='utf-8', buffering=1) as stream:
+        with redirect_stdout(stream), redirect_stderr(stream):
+            with ProcessPoolExecutor(
+                max_workers=len(settings.filters)
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        process_zebrafish_ahrens_activity,
+                        mode, settings, subjects, campaign.path,
+                    ): mode
+                    for mode in settings.filters
+                }
+                for future in as_completed(futures):
+                    mode = futures[future]
+                    try:
+                        future.result()
+                    except Exception as error:
+                        failures.append(
+                            f'{mode}: {type(error).__name__}: {error}'
+                        )
+                        print(f'{mode} launch error: {error}')
+                        states = campaign.read_status()['jobs']
+                        state = (
+                            'busy' if isinstance(
+                                error, PreprocessBusyError
+                            ) else 'failed'
+                        )
+                        for subject in subjects:
+                            job_id = f'{mode}:{subject.name}'
+                            if states[job_id] == 'pending':
+                                detail = (
+                                    str(error) if state == 'failed'
+                                    else None
+                                )
+                                campaign.mark(job_id, state, detail)
+    print(f'Ahrens campaign status: {campaign.path / "status.json"}')
     if failures:
         raise RuntimeError(
             'Ahrens preprocessing failures: ' + '; '.join(failures)

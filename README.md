@@ -38,7 +38,8 @@ The required keys are shown in `configs/templates/`.
 For Ahrens, preprocessing reads `subject_<id>/TimeSeries.h5` and writes
 compressed `subject_<id>.npz` archives. Run the configured filter
 conditions with `python run_preprocess.py --dataset zebrafish_ahrens`.
-The lifecycle log is stored under `logs/`.
+Each launch writes `status.json` and small lifecycle logs under its
+timestamped folder in `logs/`.
 
 Each recording uses one chronological 60/20/20 train, validation, and test
 split. Normalisation and PCA fit on train plus validation samples.

@@ -4,33 +4,34 @@ Input for Ahrens is a raw root containing ``subject_<id>/TimeSeries.h5``.
 Output is compressed ``subject_<id>.npz`` in the configured processed
 directory, containing float32 M and PC, valid_indices, source_subject,
 split-fit metadata, and PCA settings. Lifecycle events go to an
-ignored JSONL file in ``logs`` with completed, remaining, failed,
-and total counts.
+per-campaign ``status.json`` and transition records under ``logs``.
 The other zebrafish dataset retains its existing raw HDF5 layout.
 """
 
 import h5py
 import fcntl
-import json
 import os
 import tempfile
-from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
 import numpy as np
 
 from configs.config_global import (
     ZEBRAFISH_RAW_DIR, EXP_TYPES, ZEBRAFISH_PROCESSED_DIR,
-    RAW_DATA_SUFFIX, ROOT_DIR,
+    RAW_DATA_SUFFIX,
 )
 from utils.data_utils import get_exp_names
 from configs.ahrens_preprocess import AhrensPreprocessConfig
+from utils.campaigns.lifecycle import CampaignLog
 from .utils import process_data_matrix
 from utils.ahrens_sessions import (
     processed_directory, raw_subject_directories,
     validate_processed_subject,
 )
+
+class PreprocessBusyError(RuntimeError):
+    """Raised when another campaign owns the same filter output."""
+
 
 def process_zebrafish_activity():
     exp_names = get_exp_names()
@@ -74,9 +75,6 @@ def process_zebrafish_activity():
                 
                 np.savez(out_filename, **data_dict)
 
-AHRENS_LOG_NAME = 'ahrens_preprocess.jsonl'
-
-
 def save_processed_subject(
     output: Path, processed: dict[str, object],
 ) -> None:
@@ -98,52 +96,6 @@ def save_processed_subject(
         os.link(pending, output)
     finally:
         os.unlink(pending)
-
-
-def log_ahrens_progress(
-    stream: TextIO, filter_mode: str, pca_solver: str,
-    subject: str | None, status: str,
-    completed: int, total: int, failures: int,
-    detail: str | None = None,
-) -> None:
-    """Append one lifecycle event for the current filter condition.
-
-    Parameters
-    ----------
-    stream : TextIO
-        Open JSONL lifecycle log under the repository logs directory.
-    filter_mode : str
-        Preprocessing filter condition.
-    pca_solver : str
-        PCA solver used for this run.
-    subject : str or None
-        Subject name for recording events, otherwise None.
-    status : str
-        Start, processing, completed, skipped, failed, or finished.
-    completed : int
-        Number of validated subject archives in this invocation.
-    total : int
-        Number of discovered raw subject directories.
-    failures : int
-        Number of subject failures in this invocation.
-    detail : str or None, optional
-        Error text for a failed recording, default None.
-    """
-    event = {
-        'time_utc': datetime.now(timezone.utc).isoformat(),
-        'filter_mode': filter_mode,
-        'pca_solver': pca_solver,
-        'subject': subject,
-        'status': status,
-        'completed': completed,
-        'remaining': total - completed,
-        'failed': failures,
-        'total': total,
-    }
-    if detail is not None:
-        event['detail'] = detail
-    stream.write(json.dumps(event) + '\n')
-    stream.flush()
 
 
 def process_ahrens_subject(
@@ -224,8 +176,10 @@ def process_ahrens_subject(
 def process_zebrafish_ahrens_activity(
     filter_mode: str,
     settings: AhrensPreprocessConfig,
+    subjects: list[Path],
+    campaign_dir: Path,
 ) -> None:
-    """Process all raw Ahrens subjects with resumable lifecycle logging.
+    """Process one filter condition and update the shared campaign status.
 
     Parameters
     ----------
@@ -233,77 +187,56 @@ def process_zebrafish_ahrens_activity(
         Neural activity filter from the local campaign settings.
     settings : AhrensPreprocessConfig
         Validated PCA and storage settings.
+    subjects : list[Path]
+        Fixed raw subject directories in numeric order.
+    campaign_dir : Path
+        Per-launch lifecycle directory under repository logs.
 
     Raises
     ------
     RuntimeError
-        If one or more subjects failed after remaining subjects ran.
+        If another process owns the filter or any subject fails.
     """
     if filter_mode not in settings.filters:
         raise ValueError(
             f'Filter {filter_mode!r} is absent from configured '
             f'filters {settings.filters!r}.'
         )
-    subjects = raw_subject_directories()
+    if not subjects:
+        raise ValueError('Ahrens preprocessing needs raw subjects.')
+    campaign = CampaignLog(campaign_dir)
     output_dir = processed_directory(filter_mode)
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_dir = Path(ROOT_DIR) / 'logs'
-    log_dir.mkdir(parents=True, exist_ok=True)
-    completed = 0
+    lock_path = output_dir / '.preprocess.lock'
     failures = 0
-    log_path = log_dir / AHRENS_LOG_NAME
-    lock_path = log_dir / f'ahrens_preprocess_{filter_mode}.lock'
-    with ExitStack() as stack:
-        lock = stack.enter_context(lock_path.open('a'))
+    with lock_path.open('a') as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeError(
+            raise PreprocessBusyError(
                 f'Ahrens {filter_mode} preprocessing is already running.'
             ) from error
-        pending = list(output_dir.glob('.*.pending'))
-        for path in pending:
-            path.unlink()
-        stream = stack.enter_context(
-            log_path.open('a', encoding='utf-8', buffering=1)
-        )
-        log_ahrens_progress(
-            stream, filter_mode, settings.pca_solver, None, 'started',
-            completed, len(subjects), failures,
-            f'Removed {len(pending)} stale pending archives.',
-        )
+        for pending in output_dir.glob('.*.pending'):
+            pending.unlink()
         for subject_dir in subjects:
-            log_ahrens_progress(
-                stream, filter_mode, settings.pca_solver,
-                subject_dir.name, 'processing',
-                completed, len(subjects), failures,
-            )
+            job_id = f'{filter_mode}:{subject_dir.name}'
+            campaign.mark(job_id, 'running')
             try:
-                status = process_ahrens_subject(
+                result = process_ahrens_subject(
                     subject_dir, output_dir, filter_mode, settings
                 )
             except Exception as error:
                 failures += 1
-                log_ahrens_progress(
-                    stream, filter_mode, settings.pca_solver,
-                    subject_dir.name, 'failed',
-                    completed, len(subjects), failures,
+                campaign.mark(
+                    job_id, 'failed',
                     f'{type(error).__name__}: {error}',
                 )
                 continue
-            completed += 1
-            log_ahrens_progress(
-                stream, filter_mode, settings.pca_solver,
-                subject_dir.name, status,
-                completed, len(subjects), failures,
-            )
-        log_ahrens_progress(
-            stream, filter_mode, settings.pca_solver, None, 'finished',
-            completed, len(subjects), failures,
-        )
-    print(f'Ahrens preprocessing lifecycle log: {log_path}')
+            state = 'reused' if result == 'skipped' else 'finished'
+            campaign.mark(job_id, state)
     if failures:
         raise RuntimeError(
             f'Ahrens {filter_mode} preprocessing failed for '
-            f'{failures} of {len(subjects)} subjects; see {log_path}.'
+            f'{failures} of {len(subjects)} subjects; '
+            f'see {campaign.path / "failures.jsonl"}.'
         )

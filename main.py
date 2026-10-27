@@ -3,8 +3,8 @@
 Input is an experiment factory name from ``configs.experiments`` and a local
 ``configs/local/paths.json`` containing ``artifact_root``. Output is
 one hashed fit directory per scientific configuration, figures under
-the artifact root,
-and launch logs under the repository's ``logs`` directory.
+the artifact root, and per-campaign lifecycle folders under the
+repository's ``logs`` directory.
 """
 
 import os
@@ -14,8 +14,6 @@ import logging
 import time
 import shlex
 import sys
-import json
-from datetime import datetime, timezone
 
 import configs.experiments as experiments
 import torch
@@ -24,6 +22,7 @@ from utils.config_utils import save_config, configs_dict_unpack
 from train import model_train, complete_evaluation
 from configs.config_global import LOG_LEVEL, ROOT_DIR
 from utils.artifacts import validate_complete, is_fit_active
+from utils.campaigns.lifecycle import CampaignLog
 from configs.configs import BaseConfig
 
 def train_cmd(config_: BaseConfig) -> str:
@@ -49,271 +48,379 @@ def analysis_cmd(exp_name: str) -> str:
 
 def get_jobfile(
     cmd: str, job_name: str, dep_ids: list[str],
-    sbatch_path: str | None = None, hours: int = 8,
-    partition: str = 'normal', mem: int = 32, cpu: int = 2,
-    account: str = 'kempner_krajan_lab'
+    campaign: CampaignLog, fit_path: str | None = None,
+    hours: int = 8, partition: str = 'normal',
+    mem: int = 32, cpu: int = 2,
+    account: str = 'kempner_krajan_lab',
 ) -> str:
-    """
-    Create a job file.
-    adapted from https://github.com/gyyang/olfaction_evolution
-
-    Args:
-        cmd: python command to be execute by the cluster
-        job_name: str, name of the job file
-        dep_ids: list, a list of job ids used for job dependency
-        sbatch_path : str, Directory to store SBATCH file in.
-        hours : int, number of hours to train
-    Returns:
-        job_file : str, Path to the job file.
-    """
-    assert type(dep_ids) is list, 'dependency ids must be list'
-    assert all(type(id_) is str for id_ in dep_ids), 'dependency ids must all be strings'
-
-    if len(dep_ids) == 0:
-        dependency_line = ''
-    else:
-        dependency_line = '#SBATCH --dependency=afterok:' \
-                          + ':'.join(dep_ids) + '\n'
-
-    if sbatch_path is None:
-        sbatch_path = os.path.join(ROOT_DIR, 'logs', 'jobs')
-    sbatch_path = os.path.abspath(sbatch_path)
-    os.makedirs(sbatch_path, exist_ok=True)
-    os.makedirs(os.path.join(ROOT_DIR, 'logs'), exist_ok=True)
-    job_file = os.path.join(sbatch_path, job_name + '.sh')
-
-    with open(job_file, 'w') as f:
-        f.write(
-            '#!/bin/bash\n'
-            + '# Usage: sbatch this script\n'
-            + '#SBATCH -t {}:00:00\n'.format(hours)
-            + '#SBATCH -N 1\n'
-            + '#SBATCH -n {}\n'.format(cpu)
-            + '#SBATCH --mem={}G\n'.format(mem)
-            + '#SBATCH --gres=gpu:1\n'
-            + f'#SBATCH --account {account}\n'
-            + '#SBATCH -p {}\n'.format(partition)
-            + f'#SBATCH -e {ROOT_DIR}/logs/slurm-%j.out\n'
-            + f'#SBATCH -o {ROOT_DIR}/logs/slurm-%j.out\n'
-            + dependency_line
-            + '\n'
-            + 'source ~/.bashrc\n'
-            + f'cd {ROOT_DIR}\n'
-            + cmd + '\n'
-            + '\n'
-            )
-        print(job_file)
-    return job_file
-
-def get_idle_gpu(subprocess_list: list, config_list: list) -> int:
-    while True:
-        for idx, pipe in enumerate(subprocess_list):
-            if pipe is not None and pipe.poll() is not None:
-                if pipe.returncode:
-                    error = RuntimeError(
-                        f'Fit process exited with code {pipe.returncode}.'
-                    )
-                    logging.error('%s: %s', config_list[idx].save_path,
-                                  error)
-                    record_failure(config_list[idx], error)
-                subprocess_list[idx] = None
-                config_list[idx] = None
-            if subprocess_list[idx] is None:
-                return idx
-        time.sleep(10)
-
-def record_failure(config: BaseConfig, error: Exception) -> None:
-    """Append one fit failure to the local launch log.
+    """Write one Slurm script and its output path inside a campaign.
 
     Parameters
     ----------
-    config : NeuralPredictionConfig
-        Failed fit configuration.
-    error : Exception
-        Failure to record.
-    """
-    log_dir = os.path.join(ROOT_DIR, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
-    record = {
-        'time_utc': datetime.now(timezone.utc).isoformat(),
-        'fit_id': os.path.basename(config.save_path),
-        'error': str(error),
-    }
-    with open(os.path.join(log_dir, 'failures.jsonl'), 'a') as stream:
-        stream.write(json.dumps(record) + '\n')
+    cmd : str
+        Shell command for the job body.
+    job_name : str
+        Unique job identifier within the campaign.
+    dep_ids : list[str]
+        Slurm IDs required before this job can start.
+    campaign : CampaignLog
+        Per-launch lifecycle log folder.
+    fit_path : str or None, optional
+        Fit directory to validate before marking finished, default None.
+    hours : int, optional
+        Wall-time hours, default 8.
+    partition : str, optional
+        Slurm partition, default normal.
+    mem : int, optional
+        Requested memory in GiB, default 32.
+    cpu : int, optional
+        Requested CPU count, default 2.
+    account : str, optional
+        Slurm account, default kempner_krajan_lab.
 
+    Returns
+    -------
+    str
+        Absolute path to the generated script.
+    """
+    if not isinstance(dep_ids, list) or not all(
+        isinstance(job_id, str) for job_id in dep_ids
+    ):
+        raise ValueError('Slurm dependencies must be a list of IDs.')
+    log_path = campaign.job_log_path(job_name)
+    job_file = log_path.with_suffix('.sh')
+    marker = (
+        f'{shlex.quote(sys.executable)} -m utils.campaigns.lifecycle '
+        f'{shlex.quote(str(campaign.path))} '
+        f'{shlex.quote(job_name)}'
+    )
+    finished = f'{marker} finished'
+    if fit_path is not None:
+        finished += f' --fit-path {shlex.quote(fit_path)}'
+    lines = [
+        '#!/bin/bash',
+        '# Usage: sbatch this script',
+        f'#SBATCH -t {hours}:00:00',
+        '#SBATCH -N 1',
+        f'#SBATCH -n {cpu}',
+        f'#SBATCH --mem={mem}G',
+        '#SBATCH --gres=gpu:1',
+        f'#SBATCH --account {account}',
+        f'#SBATCH -p {partition}',
+        f'#SBATCH -e {log_path}',
+        f'#SBATCH -o {log_path}',
+    ]
+    if dep_ids:
+        lines.append(
+            '#SBATCH --dependency=afterok:' + ':'.join(dep_ids)
+        )
+    lines.extend([
+        'source ~/.bashrc',
+        f'cd {shlex.quote(ROOT_DIR)}',
+        f'{marker} running',
+        cmd,
+        'poco_exit_code=$?',
+        'if [ "$poco_exit_code" -eq 0 ]; then',
+        f'    {finished}',
+        '    poco_mark_code=$?',
+        '    if [ "$poco_mark_code" -ne 0 ]; then',
+        '        exit "$poco_mark_code"',
+        '    fi',
+        'else',
+        f'    {marker} failed --exit-code "$poco_exit_code"',
+        'fi',
+        'exit "$poco_exit_code"',
+    ])
+    job_file.write_text('\n'.join(lines) + '\n')
+    print(job_file)
+    return str(job_file)
+
+
+def fit_job_id(config: BaseConfig) -> str:
+    """Return the hash-named fit directory basename."""
+    return os.path.basename(config.save_path)
+
+
+def record_failure(
+    campaign: CampaignLog, config: BaseConfig, error: Exception,
+) -> None:
+    """Record one failed fit attempt in its campaign folder."""
+    campaign.mark(
+        fit_job_id(config), 'failed',
+        f'{type(error).__name__}: {error}',
+    )
+
+
+def finish_fit_process(
+    process: subprocess.Popen, config: BaseConfig,
+    campaign: CampaignLog,
+) -> None:
+    """Validate a finished server process and update its job state."""
+    if process.returncode == 0 and validate_complete(config):
+        campaign.mark(fit_job_id(config), 'finished')
+    else:
+        error = RuntimeError(
+            f'Fit process exited with code {process.returncode} '
+            'or has incomplete artifacts.'
+        )
+        logging.error('%s: %s', config.save_path, error)
+        record_failure(campaign, config, error)
+
+
+def get_idle_gpu(
+    processes: list, configs: list, streams: list,
+    campaign: CampaignLog,
+) -> int:
+    """Return one free GPU slot after logging completed processes."""
+    while True:
+        for index, process in enumerate(processes):
+            if process is not None and process.poll() is not None:
+                finish_fit_process(process, configs[index], campaign)
+                streams[index].close()
+                processes[index] = None
+                configs[index] = None
+                streams[index] = None
+            if processes[index] is None:
+                return index
+        time.sleep(10)
 
 def train_experiment(
     experiment: str, on_cluster: bool, on_server: bool,
-    partition: str, account: str, eval: bool = False
+    partition: str, account: str, eval: bool = False,
 ) -> list[str]:
-    """Train model across platforms given experiment name.
-    adapted from https://github.com/gyyang/olfaction_evolution
-    Args:
-        experiment: str, name of experiment to be run
-            must correspond to a function in experiments.py
-        on_cluster: bool, whether to run experiments on cluster
-        on_server: bool, if use on server
+    """Launch missing fits and track one timestamped campaign.
 
-    Returns:
-        return_ids: list, a list of job ids that are last in the dependency sequence
-            if not using cluster, return is an empty list
+    Parameters
+    ----------
+    experiment : str
+        Experiment factory in configs.experiments.
+    on_cluster : bool
+        Submit independent fits through Slurm.
+    on_server : bool
+        Run independent fits on visible server GPUs.
+    partition : str
+        Slurm partition when on_cluster is true.
+    account : str
+        Slurm account when on_cluster is true.
+    eval : bool, optional
+        Finalize evaluation instead of training, default False.
+
+    Returns
+    -------
+    list[str]
+        Submitted Slurm job IDs, empty for local execution.
     """
-    if experiment in dir(experiments):
-        # Get list of configurations from experiment function
-        exp_configs = getattr(experiments, experiment)()
-    else:
-        raise ValueError('Experiment config not found: ', experiment)
-
-    return_ids = []
-    exp_configs = configs_dict_unpack(exp_configs)
+    factory = getattr(experiments, experiment, None)
+    if factory is None or not callable(factory):
+        raise ValueError(f'Experiment config not found: {experiment}.')
+    exp_configs = configs_dict_unpack(factory())
     if not exp_configs or not isinstance(exp_configs[0], BaseConfig):
         raise ValueError(f'No valid fit configurations for {experiment}.')
-
-    pending = []
-    seen_paths = set()
+    unique = {}
     for config in exp_configs:
-        if config.save_path in seen_paths:
-            continue
-        seen_paths.add(config.save_path)
-        if validate_complete(config) or is_fit_active(config):
-            continue
-        if eval and not os.path.isfile(
+        unique.setdefault(config.save_path, config)
+    decisions = {}
+    pending = []
+    for config in unique.values():
+        job_id = fit_job_id(config)
+        if validate_complete(config):
+            decisions[job_id] = 'reused'
+        elif is_fit_active(config):
+            decisions[job_id] = 'busy'
+        elif eval and not os.path.isfile(
             os.path.join(config.save_path, 'config.json')
         ):
-            logging.warning(
-                'No saved training configuration for %s',
-                config.save_path
+            decisions[job_id] = 'missing_config'
+        else:
+            decisions[job_id] = 'pending'
+            pending.append(config)
+    if pending and input(
+        f'Continue running {len(pending)} jobs? (y/n)'
+    ) != 'y':
+        return []
+    action = 'evaluation' if eval else 'training'
+    campaign = CampaignLog.create(
+        f'{experiment}_{action}', list(decisions)
+    )
+    print(f'Campaign status: {campaign.path / "status.json"}')
+    for job_id, decision in decisions.items():
+        if decision == 'missing_config':
+            campaign.mark(
+                job_id, 'failed',
+                'No saved training configuration for evaluation.',
             )
-            continue
-        pending.append(config)
-
-    if not pending:
-        logging.info('No pending fits for %s', experiment)
-        return return_ids
-    if input(f'Continue running {len(pending)} jobs? (y/n)') != 'y':
-        return return_ids
-
+        elif decision != 'pending':
+            campaign.mark(job_id, decision)
     if not eval:
         prepared = []
         for config in pending:
             try:
                 if save_config(config, config.save_path):
                     prepared.append(config)
+                elif validate_complete(config):
+                    campaign.mark(fit_job_id(config), 'reused')
+                else:
+                    campaign.mark(fit_job_id(config), 'busy')
             except Exception as error:
                 logging.exception('Cannot prepare fit %s', config.save_path)
-                record_failure(config, error)
+                record_failure(campaign, config, error)
         pending = prepared
     if not pending:
-        return return_ids
-
-    log_dir = os.path.join(ROOT_DIR, 'logs')
-    os.makedirs(log_dir, exist_ok=True)
+        return []
+    return_ids = []
     if on_cluster:
         for config in pending:
+            job_id = fit_job_id(config)
             command = eval_cmd(config.save_path) if eval else train_cmd(config)
-            job_name = config.save_path.rsplit('/', 1)[-1]
             try:
                 job_file = get_jobfile(
-                    command, job_name, dep_ids=[], hours=config.hours,
-                    partition=partition, mem=config.mem, cpu=config.cpu,
-                    sbatch_path=os.path.join(log_dir, 'jobs'),
-                    account=account
+                    command, job_id, [], campaign,
+                    fit_path=config.save_path,
+                    hours=config.hours, partition=partition,
+                    mem=config.mem, cpu=config.cpu, account=account,
                 )
+                campaign.mark(job_id, 'submitted')
                 result = subprocess.run(
                     ['sbatch', job_file], capture_output=True, check=True
                 )
                 stdout = result.stdout.decode().strip()
-                logging.info('%s: %s', job_name, stdout)
-                return_ids.append(stdout.rsplit(' ', 1)[-1])
-            except (OSError, subprocess.CalledProcessError) as error:
-                logging.exception(
-                    'Submission failed for %s', config.save_path
-                )
-                record_failure(config, error)
+                submitted_id = stdout.rsplit(' ', 1)[-1]
+                if not submitted_id.isdecimal():
+                    raise RuntimeError(
+                        f'Invalid Slurm submission for {job_id}: '
+                        f'{stdout!r}.'
+                    )
+                logging.info('%s: %s', job_id, stdout)
+                return_ids.append(submitted_id)
+            except (OSError, subprocess.CalledProcessError,
+                    RuntimeError) as error:
+                logging.exception('Submission failed for %s', job_id)
+                record_failure(campaign, config, error)
     elif on_server:
         num_gpus = torch.cuda.device_count()
         if num_gpus < 1:
-            raise RuntimeError('Server mode requires at least one GPU.')
+            error = RuntimeError(
+                'Server mode requires at least one GPU.'
+            )
+            for config in pending:
+                record_failure(campaign, config, error)
+            raise error
         processes = [None] * num_gpus
         process_configs = [None] * num_gpus
-        streams = []
+        streams = [None] * num_gpus
         for config in pending:
-            gpu = get_idle_gpu(processes, process_configs)
-            command = eval_cmd(config.save_path) if eval else train_cmd(config)
-            log_path = os.path.join(
-                log_dir, config.save_path.rsplit('/', 1)[-1] + '.log'
+            gpu = get_idle_gpu(
+                processes, process_configs, streams, campaign
             )
-            stream = open(log_path, 'a', encoding='utf-8')
-            streams.append(stream)
+            job_id = fit_job_id(config)
+            command = eval_cmd(config.save_path) if eval else train_cmd(config)
+            stream = campaign.job_log_path(job_id).open(
+                'a', encoding='utf-8'
+            )
             environment = os.environ.copy()
             environment['CUDA_VISIBLE_DEVICES'] = str(gpu)
             try:
+                campaign.mark(job_id, 'running')
                 processes[gpu] = subprocess.Popen(
                     command, stdout=stream, stderr=stream,
-                    shell=True, env=environment
+                    shell=True, env=environment,
                 )
                 process_configs[gpu] = config
+                streams[gpu] = stream
             except OSError as error:
                 logging.exception('Cannot launch fit %s', config.save_path)
-                record_failure(config, error)
+                record_failure(campaign, config, error)
                 stream.close()
         for gpu, process in enumerate(processes):
-            if process is not None and process.wait():
-                error = RuntimeError(
-                    f'Fit process exited with code {process.returncode}.'
-                )
-                logging.error('%s: %s', process_configs[gpu].save_path,
-                              error)
-                record_failure(process_configs[gpu], error)
-        for stream in streams:
-            stream.close()
+            if process is not None:
+                process.wait()
+                finish_fit_process(process, process_configs[gpu], campaign)
+                streams[gpu].close()
     else:
         for config in pending:
+            job_id = fit_job_id(config)
+            campaign.mark(job_id, 'running')
             try:
                 if eval:
                     complete_evaluation(config)
                 else:
                     model_train(config)
+                if not validate_complete(config):
+                    raise RuntimeError(
+                        f'Fit artifacts are incomplete: {config.save_path}'
+                    )
+                campaign.mark(job_id, 'finished')
             except Exception as error:
                 logging.exception('Fit failed: %s', config.save_path)
-                record_failure(config, error)
-
+                record_failure(campaign, config, error)
     return return_ids
 
 def analyze_experiment(
     experiment: str, prev_ids: list[str], on_cluster: bool,
-    partition: str, account: str
+    partition: str, account: str,
 ) -> None:
-    """analyze experiments
-     adapted from https://github.com/gyyang/olfaction_evolution
+    """Run or submit one analysis with campaign-local lifecycle logs.
 
-     Args:
-         experiment: str, name of experiment to be analyzed
-             must correspond to a function in exp_analysis.py
-         prev_ids: list, list of previous job ids
-         on_cluster: bool, if use on the cluster
-     """
+    Parameters
+    ----------
+    experiment : str
+        Experiment name with a corresponding analysis function.
+    prev_ids : list[str]
+        Slurm job IDs that analysis must await.
+    on_cluster : bool
+        Submit analysis through Slurm when true.
+    partition : str
+        Slurm partition.
+    account : str
+        Slurm account.
+    """
     import configs.exp_analysis as exp_analysis
 
-    print('Analyzing {:s} experiment'.format(experiment))
-    if (experiment + '_analysis') in dir(exp_analysis):
-        if on_cluster:
-            python_cmd = analysis_cmd(experiment)
-            job_n = experiment + '_analysis'
-            slurm_cmd = ['sbatch', get_jobfile(
-                python_cmd, job_n, dep_ids=prev_ids,
+    function = getattr(exp_analysis, experiment + '_analysis', None)
+    if function is None or not callable(function):
+        raise ValueError(
+            f'Experiment analysis not found: {experiment}_analysis.'
+        )
+    campaign = CampaignLog.create(
+        f'{experiment}_analysis', ['analysis']
+    )
+    print(f'Campaign status: {campaign.path / "status.json"}')
+    if on_cluster:
+        try:
+            command = analysis_cmd(experiment)
+            script = get_jobfile(
+                command, 'analysis', prev_ids, campaign,
                 partition=partition, hours=24, mem=64,
-                account=account
-            )]
-            cp_process = subprocess.run(slurm_cmd, capture_output=True,
-                                        check=True)
-            cp_stdout = cp_process.stdout.decode()
-            print(cp_stdout)
-        else:
-            getattr(exp_analysis, experiment + '_analysis')()
+                account=account,
+            )
+            campaign.mark('analysis', 'submitted')
+            result = subprocess.run(
+                ['sbatch', script], capture_output=True, check=True
+            )
+            stdout = result.stdout.decode().strip()
+            if not stdout.rsplit(' ', 1)[-1].isdecimal():
+                raise RuntimeError(
+                    f'Invalid Slurm analysis submission: {stdout!r}.'
+                )
+            print(stdout)
+        except (OSError, subprocess.CalledProcessError,
+                RuntimeError) as error:
+            campaign.mark(
+                'analysis', 'failed',
+                f'{type(error).__name__}: {error}',
+            )
+            raise
     else:
-        raise ValueError('Experiment analysis not found: ', experiment + '_analysis')
+        campaign.mark('analysis', 'running')
+        try:
+            function()
+        except Exception as error:
+            campaign.mark(
+                'analysis', 'failed',
+                f'{type(error).__name__}: {error}',
+            )
+            raise
+        campaign.mark('analysis', 'finished')
 
 
 if __name__ == '__main__':
