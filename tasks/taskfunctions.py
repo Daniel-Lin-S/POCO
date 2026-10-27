@@ -13,7 +13,8 @@ import os
 from pathlib import Path
 import analysis.plots as plots
 from analysis.fit_diagnostics import (
-    fit_title, pc_label, sample_row_label,
+    EXAMPLE_COUNT, PREDICTION_DIMS, fit_title,
+    pc_label, sample_row_label,
 )
 import itertools
 
@@ -171,9 +172,17 @@ class NeuralPrediction(TaskFunction):
         else:
             return task_loss, pred_num
         
-    def plot_prediction(self, save_path: str, phase: str):
-        # visualize prediction for selected dimensions
-        for pc in [0, 20, 50, -1]:
+    def plot_prediction(self, save_path: str, phase: str) -> None:
+        """Save sampled per-PC traces for one checkpoint split.
+
+        Parameters
+        ----------
+        save_path : str
+            Absolute fit directory containing split figure folders.
+        phase : str
+            Train, validation, or test split.
+        """
+        for pc in PREDICTION_DIMS:
             if pc >= max(self.input_size):
                 continue
 
@@ -181,7 +190,7 @@ class NeuralPrediction(TaskFunction):
             targets = []
             row_labels = []
 
-            for iter in range(10):
+            for _ in range(EXAMPLE_COUNT):
                 batch_idx = np.random.randint(len(self.sample_trials[phase]))
                 data = self.sample_trials[phase][batch_idx]
                 sample_idx = np.random.randint(data[0].shape[1])
@@ -208,7 +217,7 @@ class NeuralPrediction(TaskFunction):
                 title=(
                     f'{fit_title(self.config)} | '
                     f'{phase.title()} predictions | '
-                    f'{pc_label(self.config, pc)}'
+                    f'{pc_label(self.config, pc, max(self.input_size))}'
                 ),
                 prediction_color=plots.get_model_colors(
                     [self.config.model_label]

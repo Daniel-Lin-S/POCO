@@ -75,6 +75,11 @@ def fit_title(config: NeuralPredictionConfig) -> str:
         dataset_name = 'Neural data'
     dataset = config.dataset_config[label]
     condition = str(config.dataset_filter).replace('lowpass', 'low-pass')
+    details = [dataset_name]
+    if condition != 'none':
+        details.append(condition)
+    if dataset.pc_dim is not None:
+        details.append(f'{dataset.pc_dim} PCs')
     nominal = getattr(config, 'train_data_length', None)
     if nominal is None:
         exposure = 'full chronological 60% train'
@@ -85,33 +90,75 @@ def fit_title(config: NeuralPredictionConfig) -> str:
             f'(nominal {nominal})'
         )
     return (
-        f'{config.model_label} | {dataset_name} {condition}, '
-        f'{dataset.pc_dim} PCs | {cohort} | {exposure} | '
+        f'{config.model_label} | {" ".join(details)} | '
+        f'{cohort} | {exposure} | '
         f'seed {config.seed}'
     )
 
 
-def pc_label(config: NeuralPredictionConfig, dimension: int) -> str:
-    """Name a zero-based PC index, resolving -1 to the last PC."""
+def pc_label(
+    config: NeuralPredictionConfig, dimension: int,
+    component_count: int | None = None,
+) -> str:
+    """Name a zero-based PC index, resolving -1 to the last PC.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit whose processed PC count sets the last index.
+    dimension : int
+        Zero-based component index or -1 for the last component.
+    component_count : int or None, optional
+        Actual number of recorded dimensions, default processed PC count.
+
+    Returns
+    -------
+    str
+        Explicit PC or unit index for the figure title.
+    """
     label = config.dataset_label[0]
-    count = config.dataset_config[label].pc_dim
+    dataset = config.dataset_config[label]
+    count = (component_count if component_count is not None
+             else dataset.pc_dim)
+    if count is None or count < 1:
+        raise ValueError(f'No positive component count for {label}.')
     index = count - 1 if dimension == -1 else dimension
     if index < 0 or index >= count:
         raise ValueError(
             f'PC index {dimension} is outside 0..{count - 1}.'
         )
     suffix = ' (last)' if dimension == -1 else ''
-    return f'PC index {index}{suffix}'
+    component = 'PC' if dataset.pc_dim is not None else 'Unit'
+    return f'{component} index {index}{suffix}'
 
 
 def sample_row_label(
     config: NeuralPredictionConfig, session_index: int,
     sample_index: int, session_count: int,
 ) -> str:
-    """Name a saved prediction window without implying recording time."""
+    """Name a saved prediction window without implying recording time.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit whose selected recordings define sample order.
+    session_index : int
+        Position of the sampled recording in the fit.
+    sample_index : int
+        Position of the window within the saved batch.
+    session_count : int
+        Number of sampled recordings in the saved information.
+
+    Returns
+    -------
+    str
+        Subject and batch-slot label for one plotted row.
+    """
     label = config.dataset_label[0]
     selected = config.dataset_config[label].session_ids
-    if isinstance(selected, list) and len(selected) == session_count:
+    if (isinstance(selected, list) and
+            len(selected) == session_count and
+            isinstance(selected[session_index], str)):
         recording = selected[session_index].replace('_', ' ')
     else:
         recording = f'recording {session_index + 1}'
@@ -119,7 +166,18 @@ def sample_row_label(
 
 
 def _require_dynamics(config: NeuralPredictionConfig) -> pd.DataFrame:
-    """Read finite epoch-indexed train and validation metrics."""
+    """Read finite epoch-indexed train and validation metrics.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Complete fit containing ``progress.txt``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Logged training rows with loss and MAE columns.
+    """
     path = Path(config.save_path) / 'progress.txt'
     table = pd.read_table(path)
     label = config.dataset_label[0]
@@ -145,7 +203,15 @@ def _require_dynamics(config: NeuralPredictionConfig) -> pd.DataFrame:
 def _save_training_dynamics(
     config: NeuralPredictionConfig, table: pd.DataFrame,
 ) -> None:
-    """Save loss and MAE curves with both splits in each panel."""
+    """Save loss and MAE curves with both splits in each panel.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit whose title and output directory are used.
+    table : pandas.DataFrame
+        Training rows with Epoch, TrainLoss, ValLoss, and split MAE.
+    """
     sns.set_theme(style='ticks', context='talk', font_scale=0.9)
     fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.5))
     label = config.dataset_label[0]
@@ -259,7 +325,13 @@ def _prediction_examples(
 
 
 def _save_prediction_figures(config: NeuralPredictionConfig) -> None:
-    """Redraw each split's saved examples at the original PDF paths."""
+    """Redraw each split's saved examples at the original PDF paths.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Complete fit with sample-trial arrays in ``*_best_info.npy``.
+    """
     root = Path(config.save_path)
     color = plots.get_model_colors([config.model_label])[0]
     for phase in ('train', 'val', 'test'):
@@ -283,7 +355,18 @@ def _save_prediction_figures(config: NeuralPredictionConfig) -> None:
 
 
 def figures_complete(config: NeuralPredictionConfig) -> bool:
-    """Validate the independent completion record for fit PDFs."""
+    """Validate the independent completion record for fit PDFs.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit whose figure hashes are checked.
+
+    Returns
+    -------
+    bool
+        True when all current-version PDFs match the figure marker.
+    """
     root = Path(config.save_path)
     marker = root / 'fit_figures_complete.json'
     if not marker.is_file():
