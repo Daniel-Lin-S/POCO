@@ -26,6 +26,7 @@ from analysis import plots
 from configs.configs import NeuralPredictionConfig
 from configs.experiments import (
     ahrens_length_lowpass_four, ahrens_session_lowpass_six,
+    ahrens_session_lowpass_extended,
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
@@ -44,6 +45,9 @@ FIGURE_NAMES = (
 CAMPAIGN_FACTORIES = {
     'ahrens_length_lowpass_four': ahrens_length_lowpass_four,
     'ahrens_session_lowpass_six': ahrens_session_lowpass_six,
+    'ahrens_session_lowpass_extended': (
+        ahrens_session_lowpass_extended
+    ),
 }
 
 

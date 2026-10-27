@@ -27,6 +27,7 @@ from utils.config_utils import config_from_dict, save_config
 FIT_LOCK_POLL_SECONDS = 10
 PLOTTED_CAMPAIGNS = {
     'ahrens_length_lowpass_four', 'ahrens_session_lowpass_six',
+    'ahrens_session_lowpass_extended',
 }
 
 
