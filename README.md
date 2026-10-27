@@ -21,7 +21,7 @@ This project uses multiple public neural datasets:
 * **C. elegans** data from Kato et al., *Cell*. Available [here](https://github.com/akshey-kumar/BunDLe-Net/tree/main/data/raw).
 * **C. elegans** data from [Atanas & Kim et al., *Cell*, 2023](https://wormwideweb.org/activity/dataset/). We use all 40 NeuroPAL sessions in their dataset.
 
-To set up the neural data, first place the raw data in `data/raw_datasetname/`. See `configs/config_global` for the expected paths for each dataset. Then edit and run `run_preprocess.py` to preprocess the corresponding dataset. Preprocessing includes normalization, PCA, and optional filtering. The processed data will be saved in `data/processed_datasetname`.
+For most datasets, place the raw data in `data/raw_datasetname/`. See `configs/config_global` for the expected paths for each dataset. Then run `run_preprocess.py --dataset NAME` for that dataset. Preprocessing includes normalization, PCA, and optional filtering. The processed data will be saved in `data/processed_datasetname`.
 
 You can also generate simulated data by modifying `run_preprocess.py`.
 
@@ -31,6 +31,35 @@ To use your own data, place it in `data/...` and implement a custom data process
 
 ### Train and Analyze
 
+Create a local `.poco_local.json` in the repository root before running
+experiments:
+
+```json
+{
+  "artifact_root": "/absolute/path/to/experiment_results",
+  "ahrens_raw_dir": "/absolute/path/to/ahrens_subjects",
+  "ahrens_processed_dir": "/absolute/path/to/processed_ahrens"
+}
+```
+
+For Ahrens, preprocessing reads `subject_<id>/TimeSeries.h5` and writes
+`subject_<id>.npz`. Run one dataset and filter at a time with
+`python run_preprocess.py --dataset zebrafish_ahrens --filter none`.
+
+Each recording uses one chronological 60/20/20 train, validation, and test
+split. Normalisation and PCA fit on train plus validation samples.
+Processed archives must include split-fit metadata.
+
+The session-grouping comparison partitions the same session inventory into
+different numbers of groups. Each fit trains and tests on its own sessions;
+the plotted condition combines the group results. Recording-length comparisons
+keep validation and test time ranges fixed and cap only the training range.
+Both comparisons use 10,000 optimizer steps per fit. Model size and measured
+FLOPs can vary across session groups.
+
+For Ahrens, the session comparison uses all processed subjects and only
+equal-size groupings; the available group counts divide the cohort size.
+
 To run an experiment, use:
 
 ```bash
@@ -39,7 +68,11 @@ python main.py -t exp_name
 
 Each experiment is defined as a function in `configs/experiments.py`, which returns a dictionary of configurations. You can add your own experiment functions to customize hyperparameters, datasets, or model settings. See `configs/configs.py` for a list of predefined hyperparameters. Some parameters are automatically configured based on the dataset and model.
 
-During training, evaluation results and prediction visualizations will be saved in `experiments/exp_name/...`, where you can find training progress, the best saved model, and predictions on the validation set.
+Each fit is saved under `artifact_root/fits/<hash>/`. `progress.txt`
+contains train and validation metrics; `test.txt` contains test metrics from
+the validation-selected checkpoint. `flops.json` records forward plus backward
+FLOPs for the first actual training step. `complete.json` validates the fit.
+Figures and tables are saved under `artifact_root/figures/`.
 
 If you have multiple GPUs, use the `-s` flag to run multiple experiments concurrently. On a Slurm cluster, use `-c` to submit jobs, and `-p ...` and `--acc ...` to specify the partition and account name.
 
@@ -49,7 +82,8 @@ To analyze results, use:
 python main.py -a exp_name
 ```
 
-Available analysis functions are listed in `configs/exp_analysis.py`. If the name of the analysis is `x_analysis`, simply run the command above and the corresponding figures will be saved under `figures/...`.
+Available analysis functions are listed in `configs/exp_analysis.py`. If the name of the analysis is `x_analysis`, simply run the command above and the corresponding figures will be saved under
+`artifact_root/figures/...`.
 
 **Example:**
 To run an example with 1000 training steps using the zebrafish dataset from Ahrens et al. and the C. elegans dataset from Zimmer et al., run:
