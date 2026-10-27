@@ -8,6 +8,7 @@ repository's ``logs`` directory.
 """
 
 import os
+from collections import deque
 import subprocess
 import argparse
 import logging
@@ -18,24 +19,13 @@ import sys
 import configs.experiments as experiments
 import torch
 
-from utils.config_utils import save_config, configs_dict_unpack
-from train import model_train, complete_evaluation
+from utils.config_utils import configs_dict_unpack
 from configs.config_global import LOG_LEVEL, ROOT_DIR
-from utils.artifacts import validate_complete, is_fit_active
+from utils.artifacts import validate_complete
 from utils.campaigns.lifecycle import CampaignLog
+from utils.campaigns.fit_worker import fit_command, run_fit
+from utils.campaigns.claims import is_claimed
 from configs.configs import BaseConfig
-
-def train_cmd(config_: BaseConfig) -> str:
-    """Return a command to train one fit with the active interpreter."""
-    code = f'import train; train.train_from_path({config_.save_path!r})'
-    return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
-
-
-def eval_cmd(eval_save_path: str) -> str:
-    """Return a command to evaluate one incomplete fit."""
-    code = f'import train; train.eval_from_path({eval_save_path!r})'
-    return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
-
 
 def analysis_cmd(exp_name: str) -> str:
     """Return the analysis command for a named experiment."""
@@ -49,6 +39,7 @@ def analysis_cmd(exp_name: str) -> str:
 def get_jobfile(
     cmd: str, job_name: str, dep_ids: list[str],
     campaign: CampaignLog, fit_path: str | None = None,
+    managed_lifecycle: bool = False,
     hours: int = 8, partition: str = 'normal',
     mem: int = 32, cpu: int = 2,
     account: str = 'kempner_krajan_lab',
@@ -67,6 +58,8 @@ def get_jobfile(
         Per-launch lifecycle log folder.
     fit_path : str or None, optional
         Fit directory to validate before marking finished, default None.
+    managed_lifecycle : bool, optional
+        Worker records its own lifecycle, default False.
     hours : int, optional
         Wall-time hours, default 8.
     partition : str, optional
@@ -114,23 +107,25 @@ def get_jobfile(
         lines.append(
             '#SBATCH --dependency=afterok:' + ':'.join(dep_ids)
         )
-    lines.extend([
-        'source ~/.bashrc',
-        f'cd {shlex.quote(ROOT_DIR)}',
-        f'{marker} running',
-        cmd,
-        'poco_exit_code=$?',
-        'if [ "$poco_exit_code" -eq 0 ]; then',
-        f'    {finished}',
-        '    poco_mark_code=$?',
-        '    if [ "$poco_mark_code" -ne 0 ]; then',
-        '        exit "$poco_mark_code"',
-        '    fi',
-        'else',
-        f'    {marker} failed --exit-code "$poco_exit_code"',
-        'fi',
-        'exit "$poco_exit_code"',
-    ])
+    lines.extend(['source ~/.bashrc', f'cd {shlex.quote(ROOT_DIR)}'])
+    if managed_lifecycle:
+        lines.append(cmd)
+    else:
+        lines.extend([
+            f'{marker} running',
+            cmd,
+            'poco_exit_code=$?',
+            'if [ "$poco_exit_code" -eq 0 ]; then',
+            f'    {finished}',
+            '    poco_mark_code=$?',
+            '    if [ "$poco_mark_code" -ne 0 ]; then',
+            '        exit "$poco_mark_code"',
+            '    fi',
+            'else',
+            f'    {marker} failed --exit-code "$poco_exit_code"',
+            'fi',
+            'exit "$poco_exit_code"',
+        ])
     job_file.write_text('\n'.join(lines) + '\n')
     print(job_file)
     return str(job_file)
@@ -156,6 +151,9 @@ def finish_fit_process(
     campaign: CampaignLog,
 ) -> None:
     """Validate a finished server process and update its job state."""
+    state = campaign.read_status()['jobs'][fit_job_id(config)]
+    if state in ('finished', 'reused', 'failed'):
+        return
     if process.returncode == 0 and validate_complete(config):
         campaign.mark(fit_job_id(config), 'finished')
     else:
@@ -167,22 +165,77 @@ def finish_fit_process(
         record_failure(campaign, config, error)
 
 
-def get_idle_gpu(
-    processes: list, configs: list, streams: list,
-    campaign: CampaignLog,
-) -> int:
-    """Return one free GPU slot after logging completed processes."""
-    while True:
-        for index, process in enumerate(processes):
+CLAIM_POLL_SECONDS = 10
+
+
+def run_server_queue(
+    pending: list[BaseConfig], selected_gpus: list[int],
+    campaign: CampaignLog, action: str,
+) -> None:
+    """Run independent fits while claimed fits wait off GPU slots.
+
+    Parameters
+    ----------
+    pending : list[BaseConfig]
+        Unfinished fit configurations in scientific queue order.
+    selected_gpus : list[int]
+        Physical CUDA devices assigned one concurrent fit each.
+    campaign : CampaignLog
+        Shared lifecycle record for the queue.
+    action : str
+        ``train`` or ``eval`` worker action.
+    """
+    waiting = deque(pending)
+    processes = [None] * len(selected_gpus)
+    process_configs = [None] * len(selected_gpus)
+    streams = [None] * len(selected_gpus)
+    while waiting or any(process is not None for process in processes):
+        for slot, process in enumerate(processes):
             if process is not None and process.poll() is not None:
-                finish_fit_process(process, configs[index], campaign)
-                streams[index].close()
-                processes[index] = None
-                configs[index] = None
-                streams[index] = None
-            if processes[index] is None:
-                return index
-        time.sleep(10)
+                finish_fit_process(
+                    process, process_configs[slot], campaign
+                )
+                streams[slot].close()
+                processes[slot] = None
+                process_configs[slot] = None
+                streams[slot] = None
+            if processes[slot] is not None:
+                continue
+            for _ in range(len(waiting)):
+                config = waiting.popleft()
+                job_id = fit_job_id(config)
+                if validate_complete(config):
+                    campaign.mark(job_id, 'reused')
+                    continue
+                if is_claimed(config):
+                    campaign.mark(job_id, 'busy')
+                    waiting.append(config)
+                    continue
+                environment = os.environ.copy()
+                environment['CUDA_VISIBLE_DEVICES'] = str(
+                    selected_gpus[slot]
+                )
+                stream = campaign.job_log_path(job_id).open(
+                    'a', encoding='utf-8'
+                )
+                command = fit_command(config, campaign, action)
+                try:
+                    processes[slot] = subprocess.Popen(
+                        command, stdout=stream, stderr=stream,
+                        env=environment,
+                    )
+                    process_configs[slot] = config
+                    streams[slot] = stream
+                except OSError as error:
+                    logging.exception(
+                        'Cannot launch fit %s', config.save_path
+                    )
+                    record_failure(campaign, config, error)
+                    stream.close()
+                break
+        if waiting or any(process is not None for process in processes):
+            time.sleep(CLAIM_POLL_SECONDS)
+
 
 def most_vacant_gpus(count: int) -> list[int]:
     """Select visible CUDA devices by free memory at launch.
@@ -257,8 +310,6 @@ def train_experiment(
         job_id = fit_job_id(config)
         if validate_complete(config):
             decisions[job_id] = 'reused'
-        elif is_fit_active(config):
-            decisions[job_id] = 'busy'
         elif eval and not os.path.isfile(
             os.path.join(config.save_path, 'config.json')
         ):
@@ -283,31 +334,19 @@ def train_experiment(
             )
         elif decision != 'pending':
             campaign.mark(job_id, decision)
-    if not eval:
-        prepared = []
-        for config in pending:
-            try:
-                if save_config(config, config.save_path):
-                    prepared.append(config)
-                elif validate_complete(config):
-                    campaign.mark(fit_job_id(config), 'reused')
-                else:
-                    campaign.mark(fit_job_id(config), 'busy')
-            except Exception as error:
-                logging.exception('Cannot prepare fit %s', config.save_path)
-                record_failure(campaign, config, error)
-        pending = prepared
     if not pending:
         return []
     return_ids = []
     if on_cluster:
         for config in pending:
             job_id = fit_job_id(config)
-            command = eval_cmd(config.save_path) if eval else train_cmd(config)
+            command = shlex.join(fit_command(
+                config, campaign, 'eval' if eval else 'train'
+            ))
             try:
                 job_file = get_jobfile(
                     command, job_id, [], campaign,
-                    fit_path=config.save_path,
+                    managed_lifecycle=True,
                     hours=config.hours, partition=partition,
                     mem=config.mem, cpu=config.cpu, account=account,
                 )
@@ -346,54 +385,17 @@ def train_experiment(
             for config in pending:
                 record_failure(campaign, config, error)
             raise
-        processes = [None] * len(selected_gpus)
-        process_configs = [None] * len(selected_gpus)
-        streams = [None] * len(selected_gpus)
-        for config in pending:
-            gpu = get_idle_gpu(
-                processes, process_configs, streams, campaign
-            )
-            job_id = fit_job_id(config)
-            command = eval_cmd(config.save_path) if eval else train_cmd(config)
-            stream = campaign.job_log_path(job_id).open(
-                'a', encoding='utf-8'
-            )
-            environment = os.environ.copy()
-            environment['CUDA_VISIBLE_DEVICES'] = str(selected_gpus[gpu])
-            try:
-                campaign.mark(job_id, 'running')
-                processes[gpu] = subprocess.Popen(
-                    command, stdout=stream, stderr=stream,
-                    shell=True, env=environment,
-                )
-                process_configs[gpu] = config
-                streams[gpu] = stream
-            except OSError as error:
-                logging.exception('Cannot launch fit %s', config.save_path)
-                record_failure(campaign, config, error)
-                stream.close()
-        for gpu, process in enumerate(processes):
-            if process is not None:
-                process.wait()
-                finish_fit_process(process, process_configs[gpu], campaign)
-                streams[gpu].close()
+        run_server_queue(
+            pending, selected_gpus, campaign,
+            'eval' if eval else 'train',
+        )
     else:
         for config in pending:
             job_id = fit_job_id(config)
-            campaign.mark(job_id, 'running')
             try:
-                if eval:
-                    complete_evaluation(config)
-                else:
-                    model_train(config)
-                if not validate_complete(config):
-                    raise RuntimeError(
-                        f'Fit artifacts are incomplete: {config.save_path}'
-                    )
-                campaign.mark(job_id, 'finished')
-            except Exception as error:
+                run_fit(config, campaign, 'eval' if eval else 'train')
+            except Exception:
                 logging.exception('Fit failed: %s', config.save_path)
-                record_failure(campaign, config, error)
     return return_ids
 
 def analyze_experiment(
@@ -466,12 +468,28 @@ def analyze_experiment(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-t', '--train', nargs='+', help='Train experiments', default=[])
-    parser.add_argument('-e', '--eval', nargs='+', help='Evaluate experiments', default=[])
-    parser.add_argument('-a', '--analyze', nargs='+', help='Analyze experiments', default=[])
-    parser.add_argument('-c', '--cluster', action='store_true', help='Use batch submission on Slurm cluster')
-    parser.add_argument('-s', '--server', action='store_true', help='Run experiments on a Linux server with multiple GPUs')
-    parser.add_argument('-p', '--partition', default='kempner', help='Partition of resource on cluster to use')
+    parser.add_argument(
+        '-t', '--train', nargs='+', help='Train experiments', default=[]
+    )
+    parser.add_argument(
+        '-e', '--eval', nargs='+', help='Evaluate experiments', default=[]
+    )
+    parser.add_argument(
+        '-a', '--analyze', nargs='+', help='Analyze experiments',
+        default=[]
+    )
+    parser.add_argument(
+        '-c', '--cluster', action='store_true',
+        help='Use batch submission on Slurm cluster'
+    )
+    parser.add_argument(
+        '-s', '--server', action='store_true',
+        help='Run experiments on a Linux server with multiple GPUs'
+    )
+    parser.add_argument(
+        '-p', '--partition', default='kempner',
+        help='Partition of resource on cluster to use'
+    )
     parser.add_argument('--acc', default='kempner_krajan_lab',
                         help='Account to use on cluster')
     parser.add_argument('--top-gpus', type=int, default=None,
@@ -508,10 +526,16 @@ if __name__ == '__main__':
     eval_ids = []
     if experiments2eval:
         for exp in experiments2eval:
-            exp_ids = train_experiment(exp, on_cluster=use_cluster, on_server=use_server, partition=args.partition, account=args.acc, eval=True)
+            exp_ids = train_experiment(
+                exp, on_cluster=use_cluster, on_server=use_server,
+                partition=args.partition, account=args.acc, eval=True
+            )
             eval_ids += exp_ids
 
     if experiments2analyze:
         for exp in experiments2analyze:
-            analyze_experiment(exp, prev_ids=train_ids + eval_ids,
-                               on_cluster=use_cluster, partition=args.partition, account=args.acc)
+            analyze_experiment(
+                exp, prev_ids=train_ids + eval_ids,
+                on_cluster=use_cluster, partition=args.partition,
+                account=args.acc
+            )

@@ -104,31 +104,44 @@ def save_config(config, save_path: str,
 
 import configs.configs
 
-def load_config(save_path):
-    with open(os.path.join(save_path, 'config.json'), 'r') as f:
-        config_dict = json.load(f)
+def config_from_dict(config_dict: dict):
+    """Restore a neural prediction configuration from a JSON mapping.
 
-    # Create a new instance of your config class
+    Parameters
+    ----------
+    config_dict : dict
+        Resolved fit settings with dataset configurations by label.
+
+    Returns
+    -------
+    NeuralPredictionConfig
+        Configuration with DatasetConfig instances restored.
+    """
     config = configs.configs.NeuralPredictionConfig()
-
-    # Set attributes, handling nested structures
-    for key, val in config_dict.items():
-        if key == "dataset_config" and isinstance(val, dict):
-            # If `dataset_config` is a dictionary, reinstantiate its values as DatasetConfig objects
-            dataset_config_dict = {}
-            for dataset_key, dataset_val in val.items():
-                if isinstance(dataset_val, dict):  # Ensure it's a valid dictionary
-                    dataset_config = configs.configs.DatasetConfig()
-                    for k, v in dataset_val.items():
-                        setattr(dataset_config, k, v)
-                    dataset_config_dict[dataset_key] = dataset_config
-                else:
-                    raise ValueError(f"Unexpected value in dataset_config for key {dataset_key}: {dataset_val}")
-            setattr(config, key, dataset_config_dict)
-        else:
-            setattr(config, key, val)
-
+    for key, value in config_dict.items():
+        if key != 'dataset_config':
+            setattr(config, key, value)
+            continue
+        if not isinstance(value, dict):
+            raise ValueError('dataset_config must be a mapping.')
+        datasets = {}
+        for label, fields in value.items():
+            if not isinstance(fields, dict):
+                raise ValueError(
+                    f'Dataset configuration {label!r} must be a mapping.'
+                )
+            dataset = configs.configs.DatasetConfig()
+            dataset.__dict__.update(fields)
+            datasets[label] = dataset
+        config.dataset_config = datasets
     return config
+
+
+def load_config(save_path):
+    """Read and restore ``config.json`` from one absolute fit directory."""
+    with open(os.path.join(save_path, 'config.json')) as stream:
+        return config_from_dict(json.load(stream))
+
 
 def _vary_config_combinatorial(base_config, config_ranges):
     """Return combinatorial configurations.
