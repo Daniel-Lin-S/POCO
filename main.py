@@ -338,35 +338,48 @@ def train_experiment(
         return []
     return_ids = []
     if on_cluster:
-        for config in pending:
-            job_id = fit_job_id(config)
-            command = shlex.join(fit_command(
-                config, campaign, 'eval' if eval else 'train'
-            ))
-            try:
-                job_file = get_jobfile(
-                    command, job_id, [], campaign,
-                    managed_lifecycle=True,
-                    hours=config.hours, partition=partition,
-                    mem=config.mem, cpu=config.cpu, account=account,
-                )
-                campaign.mark(job_id, 'submitted')
-                result = subprocess.run(
-                    ['sbatch', job_file], capture_output=True, check=True
-                )
-                stdout = result.stdout.decode().strip()
-                submitted_id = stdout.rsplit(' ', 1)[-1]
-                if not submitted_id.isdecimal():
-                    raise RuntimeError(
-                        f'Invalid Slurm submission for {job_id}: '
-                        f'{stdout!r}.'
+        waiting = deque(pending)
+        while waiting:
+            for _ in range(len(waiting)):
+                config = waiting.popleft()
+                job_id = fit_job_id(config)
+                if validate_complete(config):
+                    campaign.mark(job_id, 'reused')
+                    continue
+                if is_claimed(config):
+                    campaign.mark(job_id, 'busy')
+                    waiting.append(config)
+                    continue
+                command = shlex.join(fit_command(
+                    config, campaign, 'eval' if eval else 'train'
+                ))
+                try:
+                    job_file = get_jobfile(
+                        command, job_id, [], campaign,
+                        managed_lifecycle=True,
+                        hours=config.hours, partition=partition,
+                        mem=config.mem, cpu=config.cpu, account=account,
                     )
-                logging.info('%s: %s', job_id, stdout)
-                return_ids.append(submitted_id)
-            except (OSError, subprocess.CalledProcessError,
-                    RuntimeError) as error:
-                logging.exception('Submission failed for %s', job_id)
-                record_failure(campaign, config, error)
+                    campaign.mark(job_id, 'submitted')
+                    result = subprocess.run(
+                        ['sbatch', job_file], capture_output=True,
+                        check=True
+                    )
+                    stdout = result.stdout.decode().strip()
+                    submitted_id = stdout.rsplit(' ', 1)[-1]
+                    if not submitted_id.isdecimal():
+                        raise RuntimeError(
+                            f'Invalid Slurm submission for {job_id}: '
+                            f'{stdout!r}.'
+                        )
+                    logging.info('%s: %s', job_id, stdout)
+                    return_ids.append(submitted_id)
+                except (OSError, subprocess.CalledProcessError,
+                        RuntimeError) as error:
+                    logging.exception('Submission failed for %s', job_id)
+                    record_failure(campaign, config, error)
+            if waiting:
+                time.sleep(CLAIM_POLL_SECONDS)
     elif on_server:
         num_gpus = torch.cuda.device_count()
         if num_gpus < 1:
