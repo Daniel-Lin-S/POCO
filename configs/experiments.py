@@ -770,6 +770,31 @@ def ahrens_session_lowpass_extended() -> dict:
     return configure_dataset(configure_models(configs))
 
 
+
+def ahrens_session_lowpass_fixed_priority() -> dict:
+    """Select reusable fixed-reference fits from the extended campaign.
+
+    Returns
+    -------
+    dict
+        Existing resolved configurations grouped by seed. Fit identity
+        and scientific settings are identical to the full campaign.
+    """
+    settings = load_ahrens_session_extended_campaign()
+    reference = set(settings['reference_subjects'])
+    selected = {}
+    for seed, configs in ahrens_session_lowpass_extended().items():
+        selected[seed] = [
+            config for config in configs
+            if reference <= set(
+                config.dataset_config[
+                    config.dataset_label[0]
+                ].session_ids
+            )
+        ]
+    return selected
+
+
 def ahrens_length_lowpass_four() -> dict:
     """Resolve separate low-pass length fits for four Ahrens subjects.
 
