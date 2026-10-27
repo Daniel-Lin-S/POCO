@@ -13,6 +13,9 @@ from utils.config_utils import vary_config
 from configs.configure_model_datasets import configure_models, configure_dataset
 from configs.campaigns.ahrens_length import load_ahrens_length_campaign
 from configs.campaigns.ahrens_session import load_ahrens_session_campaign
+from configs.campaigns.ahrens_session_extended import (
+    load_ahrens_session_extended_campaign,
+)
 from utils.ahrens_sessions import (
     equal_group_counts, equal_subject_group_labels,
     processed_subject_names, require_matching_subjects,
@@ -734,6 +737,35 @@ def ahrens_session_lowpass_six() -> dict:
     configs = vary_config(
         config, config_ranges, mode='combinatorial',
         num_seed=settings['seeds']
+    )
+    return configure_dataset(configure_models(configs))
+
+
+
+def ahrens_session_lowpass_extended() -> dict:
+    """Resolve the 18-subject session campaign with explicit groups.
+
+    Returns
+    -------
+    dict
+        POCO and NLinear configurations grouped by seed.
+    """
+    settings = load_ahrens_session_extended_campaign()
+    labels = [
+        f"zebrafishahrens_pc-{'+'.join(group)}"
+        for size in settings['groups']
+        for group in settings['groups'][size]
+    ]
+    config = NeuralPredictionConfig()
+    config.experiment_name = 'ahrens_session_lowpass_extended'
+    config.max_batch = settings['max_batch']
+    ranges = OrderedDict()
+    ranges['dataset_filter'] = [settings['filter']]
+    ranges['dataset_label'] = labels
+    ranges['model_label'] = settings['models']
+    configs = vary_config(
+        config, ranges, mode='combinatorial',
+        num_seed=settings['seeds'],
     )
     return configure_dataset(configure_models(configs))
 
