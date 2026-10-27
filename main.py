@@ -1,39 +1,57 @@
+"""Launch POCO experiment fits and analyses.
+
+Input is an experiment factory name from ``configs.experiments`` and a local
+``.poco_local.json`` containing ``artifact_root``. Output is one hashed fit
+directory per scientific configuration, figures under the artifact root,
+and launch logs under the repository's ``logs`` directory.
+"""
+
 import os
 import subprocess
 import argparse
 import logging
 import time
+import shlex
+import sys
+import json
+from datetime import datetime, timezone
 
 import configs.experiments as experiments
-import configs.exp_analysis as exp_analysis
 import torch
 
 from utils.config_utils import save_config, configs_dict_unpack
-from train import model_train, model_eval
+from train import model_train, complete_evaluation
 from configs.config_global import LOG_LEVEL, ROOT_DIR
+from utils.artifacts import validate_complete, is_fit_active
 from configs.configs import BaseConfig
 
-def train_cmd(config_):
-    arg = '\'' + config_.save_path + '\''
-    command = r'''python -c "import train; train.train_from_path(''' + arg + ''')"'''
-    return command
+def train_cmd(config_: BaseConfig) -> str:
+    """Return a command to train one fit with the active interpreter."""
+    code = f'import train; train.train_from_path({config_.save_path!r})'
+    return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
 
 
-def eval_cmd(eval_save_path):
-    arg = '\'' + eval_save_path + '\''
-    command = r'''python -c "import train; train.eval_from_path(''' + arg + ''')"'''
-    return command
+def eval_cmd(eval_save_path: str) -> str:
+    """Return a command to evaluate one incomplete fit."""
+    code = f'import train; train.eval_from_path({eval_save_path!r})'
+    return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
 
 
-def analysis_cmd(exp_name):
-    arg = exp_name + '_analysis()'
-    command = r'''python -c "import configs.exp_analysis as exp_analysis; exp_analysis.''' + arg + '''"'''
-    return command
+def analysis_cmd(exp_name: str) -> str:
+    """Return the analysis command for a named experiment."""
+    code = (
+        'import configs.exp_analysis as analysis; '
+        f'analysis.{exp_name}_analysis()'
+    )
+    return f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}'
 
 
-def get_jobfile(cmd, job_name, dep_ids, 
-                sbatch_path='./sbatch/', hours=8, partition='normal', 
-                mem=32, cpu=2, account='kempner_krajan_lab'):
+def get_jobfile(
+    cmd: str, job_name: str, dep_ids: list[str],
+    sbatch_path: str | None = None, hours: int = 8,
+    partition: str = 'normal', mem: int = 32, cpu: int = 2,
+    account: str = 'kempner_krajan_lab'
+) -> str:
     """
     Create a job file.
     adapted from https://github.com/gyyang/olfaction_evolution
@@ -56,12 +74,17 @@ def get_jobfile(cmd, job_name, dep_ids,
         dependency_line = '#SBATCH --dependency=afterok:' \
                           + ':'.join(dep_ids) + '\n'
 
+    if sbatch_path is None:
+        sbatch_path = os.path.join(ROOT_DIR, 'logs', 'jobs')
+    sbatch_path = os.path.abspath(sbatch_path)
     os.makedirs(sbatch_path, exist_ok=True)
+    os.makedirs(os.path.join(ROOT_DIR, 'logs'), exist_ok=True)
     job_file = os.path.join(sbatch_path, job_name + '.sh')
 
     with open(job_file, 'w') as f:
         f.write(
             '#!/bin/bash\n'
+            + '# Usage: sbatch this script\n'
             + '#SBATCH -t {}:00:00\n'.format(hours)
             + '#SBATCH -N 1\n'
             + '#SBATCH -n {}\n'.format(cpu)
@@ -69,12 +92,11 @@ def get_jobfile(cmd, job_name, dep_ids,
             + '#SBATCH --gres=gpu:1\n'
             + f'#SBATCH --account {account}\n'
             + '#SBATCH -p {}\n'.format(partition)
-            + '#SBATCH -e ./sbatch/slurm-%j.out\n'
-            + '#SBATCH -o ./sbatch/slurm-%j.out\n'
+            + f'#SBATCH -e {ROOT_DIR}/logs/slurm-%j.out\n'
+            + f'#SBATCH -o {ROOT_DIR}/logs/slurm-%j.out\n'
             + dependency_line
             + '\n'
             + 'source ~/.bashrc\n'
-            + 'conda activate metafish\n'
             + f'cd {ROOT_DIR}\n'
             + cmd + '\n'
             + '\n'
@@ -82,17 +104,48 @@ def get_jobfile(cmd, job_name, dep_ids,
         print(job_file)
     return job_file
 
-def get_idle_gpu(subprocess_list):
+def get_idle_gpu(subprocess_list: list, config_list: list) -> int:
     while True:
         for idx, pipe in enumerate(subprocess_list):
             if pipe is not None and pipe.poll() is not None:
-                print("Experiment completed with code", pipe.poll(), flush=True)
-                pipe = None
-            if pipe == None:
+                if pipe.returncode:
+                    error = RuntimeError(
+                        f'Fit process exited with code {pipe.returncode}.'
+                    )
+                    logging.error('%s: %s', config_list[idx].save_path,
+                                  error)
+                    record_failure(config_list[idx], error)
+                subprocess_list[idx] = None
+                config_list[idx] = None
+            if subprocess_list[idx] is None:
                 return idx
         time.sleep(10)
 
-def train_experiment(experiment, on_cluster, on_server, partition, account, overwrite=False, eval=False):
+def record_failure(config: BaseConfig, error: Exception) -> None:
+    """Append one fit failure to the local launch log.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Failed fit configuration.
+    error : Exception
+        Failure to record.
+    """
+    log_dir = os.path.join(ROOT_DIR, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    record = {
+        'time_utc': datetime.now(timezone.utc).isoformat(),
+        'fit_id': os.path.basename(config.save_path),
+        'error': str(error),
+    }
+    with open(os.path.join(log_dir, 'failures.jsonl'), 'a') as stream:
+        stream.write(json.dumps(record) + '\n')
+
+
+def train_experiment(
+    experiment: str, on_cluster: bool, on_server: bool,
+    partition: str, account: str, eval: bool = False
+) -> list[str]:
     """Train model across platforms given experiment name.
     adapted from https://github.com/gyyang/olfaction_evolution
     Args:
@@ -112,82 +165,125 @@ def train_experiment(experiment, on_cluster, on_server, partition, account, over
         raise ValueError('Experiment config not found: ', experiment)
 
     return_ids = []
-    
-    # exp_configs is a list of configs
     exp_configs = configs_dict_unpack(exp_configs)
-    assert isinstance(exp_configs[0], BaseConfig), \
-        'exp_configs should be list of configs'
+    if not exp_configs or not isinstance(exp_configs[0], BaseConfig):
+        raise ValueError(f'No valid fit configurations for {experiment}.')
+
+    pending = []
+    seen_paths = set()
+    for config in exp_configs:
+        if config.save_path in seen_paths:
+            continue
+        seen_paths.add(config.save_path)
+        if validate_complete(config) or is_fit_active(config):
+            continue
+        if eval and not os.path.isfile(
+            os.path.join(config.save_path, 'config.json')
+        ):
+            logging.warning(
+                'No saved training configuration for %s',
+                config.save_path
+            )
+            continue
+        pending.append(config)
+
+    if not pending:
+        logging.info('No pending fits for %s', experiment)
+        return return_ids
+    if input(f'Continue running {len(pending)} jobs? (y/n)') != 'y':
+        return return_ids
 
     if not eval:
-        count = 0
-        for config in exp_configs:
-            config.overwrite = overwrite
-            if save_config(config, config.save_path):
-                count += 1
+        prepared = []
+        for config in pending:
+            try:
+                if save_config(config, config.save_path):
+                    prepared.append(config)
+            except Exception as error:
+                logging.exception('Cannot prepare fit %s', config.save_path)
+                record_failure(config, error)
+        pending = prepared
+    if not pending:
+        return return_ids
 
-        # prompt if user wants to continue
-        if count == 0:
-            logging.info('All experiments already completed for {:s}'.format(experiment))
-            return return_ids
-        elif input(f'Continue running {count} jobs? (y/n)') != 'y':
-            return return_ids
-    else:
-        for config in exp_configs:
-            config.overwrite = False
-            if save_config(config, config.save_path, show_message=False):
-                logging.info(f'Training not done at {config.save_path}')
-
+    log_dir = os.path.join(ROOT_DIR, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
     if on_cluster:
-        for config in exp_configs:
-            if not save_config(config, config.save_path, show_message=False) and not eval:
-                continue
-            python_cmd = train_cmd(config) if not eval else eval_cmd(config.save_path)
-            job_n = config.experiment_name + '_' + config.model_name
-            cp_process = subprocess.run(['sbatch', get_jobfile(python_cmd,
-                                                                job_n,
-                                                                dep_ids=[],
-                                                                hours=config.hours, 
-                                                                partition=partition,
-                                                                mem=config.mem,
-                                                                cpu=config.cpu,
-                                                                sbatch_path=config.save_path,
-                                                                account=account
-                                                                )],
-                                        capture_output=True, check=True)
-            cp_stdout = cp_process.stdout.decode()
-            print(cp_stdout)
-            job_id = cp_stdout[-9:-1]
-            return_ids.append(job_id)
-
+        for config in pending:
+            command = eval_cmd(config.save_path) if eval else train_cmd(config)
+            job_name = config.save_path.rsplit('/', 1)[-1]
+            try:
+                job_file = get_jobfile(
+                    command, job_name, dep_ids=[], hours=config.hours,
+                    partition=partition, mem=config.mem, cpu=config.cpu,
+                    sbatch_path=os.path.join(log_dir, 'jobs'),
+                    account=account
+                )
+                result = subprocess.run(
+                    ['sbatch', job_file], capture_output=True, check=True
+                )
+                stdout = result.stdout.decode().strip()
+                logging.info('%s: %s', job_name, stdout)
+                return_ids.append(stdout.rsplit(' ', 1)[-1])
+            except (OSError, subprocess.CalledProcessError) as error:
+                logging.exception(
+                    'Submission failed for %s', config.save_path
+                )
+                record_failure(config, error)
     elif on_server:
         num_gpus = torch.cuda.device_count()
-        print(f"Running on {num_gpus} gpu(s) ...", flush=True)
-        subprocesses = [None for _ in range(num_gpus)]
-
-        for config in exp_configs:
-            if not save_config(config, config.save_path, show_message=False) and not eval:
-                continue
-            id = get_idle_gpu(subprocesses)
-            cmd = f'export CUDA_VISIBLE_DEVICES={id}' + '\n' + (train_cmd(config) if not eval else eval_cmd(config.save_path))
-            out_path = os.path.join(config.save_path, 'out.txt')
-            out_file = open(out_path, mode='w')
-            subprocesses[id] = subprocess.Popen(cmd, stdout=out_file, stderr=out_file, shell=True)
-
-        for pipe in subprocesses:
-            if pipe is not None:
-                if pipe.poll() is None:
-                    print("Experiment completed with code", pipe.wait())
-                else:
-                    print("Experiment completed with code", pipe.poll())
-
+        if num_gpus < 1:
+            raise RuntimeError('Server mode requires at least one GPU.')
+        processes = [None] * num_gpus
+        process_configs = [None] * num_gpus
+        streams = []
+        for config in pending:
+            gpu = get_idle_gpu(processes, process_configs)
+            command = eval_cmd(config.save_path) if eval else train_cmd(config)
+            log_path = os.path.join(
+                log_dir, config.save_path.rsplit('/', 1)[-1] + '.log'
+            )
+            stream = open(log_path, 'a', encoding='utf-8')
+            streams.append(stream)
+            environment = os.environ.copy()
+            environment['CUDA_VISIBLE_DEVICES'] = str(gpu)
+            try:
+                processes[gpu] = subprocess.Popen(
+                    command, stdout=stream, stderr=stream,
+                    shell=True, env=environment
+                )
+                process_configs[gpu] = config
+            except OSError as error:
+                logging.exception('Cannot launch fit %s', config.save_path)
+                record_failure(config, error)
+                stream.close()
+        for gpu, process in enumerate(processes):
+            if process is not None and process.wait():
+                error = RuntimeError(
+                    f'Fit process exited with code {process.returncode}.'
+                )
+                logging.error('%s: %s', process_configs[gpu].save_path,
+                              error)
+                record_failure(process_configs[gpu], error)
+        for stream in streams:
+            stream.close()
     else:
-        for config in exp_configs:
-            if eval or save_config(config, config.save_path, show_message=False):
-                model_train(config) if not eval else model_eval(config)
+        for config in pending:
+            try:
+                if eval:
+                    complete_evaluation(config)
+                else:
+                    model_train(config)
+            except Exception as error:
+                logging.exception('Fit failed: %s', config.save_path)
+                record_failure(config, error)
 
     return return_ids
 
-def analyze_experiment(experiment, prev_ids, on_cluster, partition, account):
+def analyze_experiment(
+    experiment: str, prev_ids: list[str], on_cluster: bool,
+    partition: str, account: str
+) -> None:
     """analyze experiments
      adapted from https://github.com/gyyang/olfaction_evolution
 
@@ -197,14 +293,18 @@ def analyze_experiment(experiment, prev_ids, on_cluster, partition, account):
          prev_ids: list, list of previous job ids
          on_cluster: bool, if use on the cluster
      """
+    import configs.exp_analysis as exp_analysis
+
     print('Analyzing {:s} experiment'.format(experiment))
     if (experiment + '_analysis') in dir(exp_analysis):
         if on_cluster:
             python_cmd = analysis_cmd(experiment)
             job_n = experiment + '_analysis'
-            slurm_cmd = ['sbatch', get_jobfile(python_cmd, job_n,
-                                               dep_ids=prev_ids, partition=partition,
-                                               hours=24, mem=64, account=account)]
+            slurm_cmd = ['sbatch', get_jobfile(
+                python_cmd, job_n, dep_ids=prev_ids,
+                partition=partition, hours=24, mem=64,
+                account=account
+            )]
             cp_process = subprocess.run(slurm_cmd, capture_output=True,
                                         check=True)
             cp_stdout = cp_process.stdout.decode()
@@ -224,7 +324,6 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', action='store_true', help='Run experiments on a Linux server with multiple GPUs')
     parser.add_argument('-p', '--partition', default='kempner', help='Partition of resource on cluster to use')
     parser.add_argument('--acc', default='kempner_krajan_lab', help='Account to use on cluster')
-    parser.add_argument('-o', '--overwrite', action='store_true', help='Overwrite existing complete runs')
     
     args = parser.parse_args()
     experiments2train = args.train
@@ -241,7 +340,10 @@ if __name__ == '__main__':
     train_ids = []
     if experiments2train:
         for exp in experiments2train:
-            exp_ids = train_experiment(exp, on_cluster=use_cluster, on_server=use_server, partition=args.partition, account=args.acc, overwrite=args.overwrite)
+            exp_ids = train_experiment(
+                exp, on_cluster=use_cluster, on_server=use_server,
+                partition=args.partition, account=args.acc
+            )
             train_ids += exp_ids
 
     eval_ids = []

@@ -11,6 +11,10 @@ from configs.configs import BaseConfig, NeuralPredictionConfig
 from configs.config_global import EXP_TYPES
 from utils.config_utils import vary_config
 from configs.configure_model_datasets import configure_models, configure_dataset
+from utils.ahrens_sessions import (
+    equal_group_counts, equal_subject_group_labels,
+    processed_subject_names, require_matching_subjects,
+)
 
 def all_experiments():
     # only a sanity check that all functions return configs correctly
@@ -341,7 +345,8 @@ def tsmixer_compare_ffdim():
     
     config_ranges = OrderedDict()
     config_ranges['dataset_label'] = [f'zebrafish_pc-{session}' for session in range(19)] + \
-        [f'zebrafishahrens_pc-{session}' for session in range(15)] + \
+        [f'zebrafishahrens_pc-{subject}'
+         for subject in processed_subject_names()] + \
         [f'mice-{session}' for session in range(12)]
     config_ranges['model_label'] = ['TSMixer', ]
     config_ranges['tsmixer_ff_dim'] = [64, 128, 256, 512]
@@ -520,7 +525,8 @@ def compare_models_zebrafish_ahrens_single_session():
     config.max_batch = 5000
 
     config_ranges = OrderedDict()
-    config_ranges['dataset_label'] = [f'zebrafishahrens_pc-{session}' for session in range(15)]
+    config_ranges['dataset_label'] = [f'zebrafishahrens_pc-{subject}'
+         for subject in processed_subject_names()]
     config_ranges['model_label'] = single_session_model_list
     configs = vary_config(config, config_ranges, mode='combinatorial', num_seed=4)
 
@@ -589,32 +595,68 @@ def compare_models_multiple_splits_zebrafish():
     configs = configure_dataset(configs)
     return configs
 
-def compare_models_multiple_splits_zebrafish_ahrens():
+def ahrens_scaling_labels(subjects: list[str]) -> list[str]:
+    """Create equal-size raw and PC grouping labels for one cohort.
+
+    Parameters
+    ----------
+    subjects : list[str]
+        Processed subject names in numeric order.
+
+    Returns
+    -------
+    list[str]
+        Explicit subject-group labels, raw followed by PC.
+    """
+    labels = []
+    for dataset in ('zebrafishahrens', 'zebrafishahrens_pc'):
+        groups = equal_subject_group_labels(subjects, dataset)
+        for count in equal_group_counts(len(subjects)):
+            labels.extend(groups[count])
+    return labels
+
+
+def compare_models_multiple_splits_zebrafish_ahrens() -> dict:
+    """Configure equal-size grouping on all processed Ahrens subjects.
+
+    Returns
+    -------
+    dict
+        Resolved fits grouped by random seed.
+    """
     config = NeuralPredictionConfig()
     config.experiment_name = 'compare_models_multiple_splits'
 
     config_ranges = OrderedDict()
-    config_ranges['dataset_filter'] = ['none', ]
-    config_ranges['dataset_label'] = \
-        create_splits(15, [1, 2, 3, 5, 8, 15], 'zebrafishahrens') + \
-        create_splits(15, [1, 2, 3, 5, 8, 15], 'zebrafishahrens_pc')
+    config_ranges['dataset_filter'] = ['none']
+    subjects = processed_subject_names()
+    config_ranges['dataset_label'] = ahrens_scaling_labels(subjects)
     config_ranges['model_label'] = ['POCO', 'TexFilter']
-    configs = vary_config(config, config_ranges, mode='combinatorial', num_seed=2)
+    configs = vary_config(config, config_ranges, mode='combinatorial',
+                          num_seed=2)
     configs = configure_models(configs)
     configs = configure_dataset(configs)
     return configs
 
-def compare_models_multiple_splits_zebrafish_ahrens_lowpass():
+
+def compare_models_multiple_splits_zebrafish_ahrens_lowpass() -> dict:
+    """Configure equal-size grouping for low-pass Ahrens subjects.
+
+    Returns
+    -------
+    dict
+        Resolved fits grouped by random seed.
+    """
     config = NeuralPredictionConfig()
     config.experiment_name = 'compare_models_multiple_splits'
 
     config_ranges = OrderedDict()
-    config_ranges['dataset_filter'] = ['lowpass', ]
-    config_ranges['dataset_label'] = \
-        create_splits(15, [1, 2, 3, 5, 8, 15], 'zebrafishahrens') + \
-        create_splits(15, [1, 2, 3, 5, 8, 15], 'zebrafishahrens_pc')
+    config_ranges['dataset_filter'] = ['lowpass']
+    subjects = require_matching_subjects(('none', 'lowpass'))
+    config_ranges['dataset_label'] = ahrens_scaling_labels(subjects)
     config_ranges['model_label'] = ['POCO', 'TexFilter']
-    configs = vary_config(config, config_ranges, mode='combinatorial', num_seed=2)
+    configs = vary_config(config, config_ranges, mode='combinatorial',
+                          num_seed=2)
     configs = configure_models(configs)
     configs = configure_dataset(configs)
     return configs
@@ -669,7 +711,8 @@ def compare_train_length_zebrafish_ahrens():
 
     config_ranges = OrderedDict()
     config_ranges['dataset_filter'] = ['none', 'lowpass', ]
-    config_ranges['dataset_label'] = ['zebrafishahrens_pc', ]
+    require_matching_subjects(('none', 'lowpass'))
+    config_ranges['dataset_label'] = ['zebrafishahrens_pc']
     config_ranges['model_label'] = training_set_size_models
     config_ranges['train_data_length'] = [256, 512, 1024, 1536, 2048, 3072]
 

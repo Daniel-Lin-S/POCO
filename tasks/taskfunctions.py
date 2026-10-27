@@ -1,18 +1,21 @@
-import random
+"""Compute phase-specific neural prediction losses and metrics.
+
+Input is per-session input and target tensors with time, batch, and unit
+axes. Output is a scalar training loss or an evaluation loss with a
+prediction count. Best-split ``*_best_info.npy`` files hold mse, mae,
+pred_num, and sample_trials arrays for each selected session.
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import os
 import analysis.plots as plots
-import numpy as np
 import itertools
 
 from configs.config_global import DEVICE
 from configs.configs import SupervisedLearningBaseConfig, NeuralPredictionConfig
 from utils.logger import Logger
-from models import Decoder
-from typing import List
 
 def data_batch_to_device(data_b, device=DEVICE):
     if type(data_b) is torch.Tensor:
@@ -38,12 +41,23 @@ class TaskFunction:
         """
         raise NotImplementedError
 
-    def after_testing_callback(self, logger: Logger, save_path: str, is_best: bool, batch_num: int, testing: bool = False):
-        """
-        An optional function called after the test stage
-        :param is_best: whether the validation result is the best one; always True for the test set (when testing=True)
-        :param batch_num: number of batches used for training
-        :param testing: whether the test is on the test set
+    def after_testing_callback(self, logger: Logger, save_path: str,
+                               is_best: bool, batch_num: int,
+                               phase: str = 'val'):
+        """Save metrics after validation or final test evaluation.
+
+        Parameters
+        ----------
+        logger : Logger
+            Split-specific metric writer.
+        save_path : str
+            Absolute fit directory.
+        is_best : bool
+            Whether to save current split diagnostics.
+        batch_num : int
+            Number of completed training steps.
+        phase : str, optional
+            Evaluation split, default 'val'.
         """
         pass
 
@@ -100,18 +114,17 @@ class NeuralPrediction(TaskFunction):
     def roll(self, model: nn.Module, data_batch: tuple, phase: str = 'train'):
         train_flag = phase == 'train'
         
-        input, target, info_list = data_batch
+        input, target, _ = data_batch
         input, target = data_batch_to_device((input, target))
         output = model(input)
     
         task_loss = torch.zeros(1).to(DEVICE)
         pred_num = 0
 
-        mean_list = []
-        std_list = []
-
-        for idx, (inp, out, tar, info) in enumerate(zip(input, output, target, info_list)):
-            if target is None or np.prod(tar.shape) == 0:
+        for idx, (inp, out, tar) in enumerate(
+            zip(input, output, target)
+        ):
+            if tar is None or np.prod(tar.shape) == 0:
                 continue
 
             if self.loss_mode[: 14] == 'reconstruction':
@@ -143,11 +156,11 @@ class NeuralPrediction(TaskFunction):
             task_loss += self.criterion(out, tar) 
             pred_num += np.prod(tar.shape)
 
-            tar = tar[-self.pred_step: ]
-            mean_list.append(torch.mean(tar, dim=0).reshape(-1))
-            std_list.append(torch.std(tar, dim=0).reshape(-1))
-
-        task_loss = task_loss / max(1, pred_num)
+        if pred_num == 0:
+            raise ValueError(f'No prediction targets in {phase} batch.')
+        task_loss = task_loss / pred_num
+        if not torch.isfinite(task_loss).all():
+            raise ValueError(f'Non-finite prediction loss in {phase} batch.')
 
         if train_flag:
             return task_loss
@@ -185,15 +198,18 @@ class NeuralPrediction(TaskFunction):
                 len(preds[0]) - self.pred_step
             )
         
-    def after_testing_callback(self, logger: Logger, save_path: str, is_best: bool, batch_num: int, testing: bool = False):
+    def after_testing_callback(self, logger: Logger, save_path: str,
+                               is_best: bool, batch_num: int,
+                               phase: str = 'val'):
 
         # compute mean loss for the prediction part
-        for phase in ['train', 'val']:
-
-            if phase == 'val':
-                assert self.mse_baseline.get(phase) is not None, 'mse_baseline is not set'
-            if np.sum(self.pred_num[phase][0]) == 0:
-                continue
+        phases = ['train', 'val'] if phase == 'val' else ['test']
+        horizon = self.pred_step if self.pred_step > 0 else self.seq_len
+        for split in phases:
+            if split in ('val', 'test') and split not in self.mse_baseline:
+                raise ValueError(
+                    f'Missing {split} baseline for prediction score.'
+                )
 
             for dataset, session_ids in self.session_ids.items():
                 sum_pred_num = 0
@@ -202,38 +218,60 @@ class NeuralPrediction(TaskFunction):
                 avg_mse_score = 0
 
                 for idx in session_ids:
-                    sum_pred_num += self.pred_num[phase][idx].sum() * (self.pred_step if self.pred_step > 0 else self.seq_len)
-                    sum_mse += self.sum_mse[phase][idx].sum()
-                    sum_mae += self.sum_mae[phase][idx].sum()
+                    count = self.pred_num[split][idx].sum()
+                    sum_pred_num += count * horizon
+                    sum_mse += self.sum_mse[split][idx].sum()
+                    sum_mae += self.sum_mae[split][idx].sum()
 
-                    if phase == 'val':
-                        assert self.pred_num[phase][idx].sum() > 0, f'no prediction for session {idx}, is the test set empty?'
-                        mse = self.sum_mse[phase][idx].sum() / self.pred_num[phase][idx].sum() / (self.pred_step if self.pred_step > 0 else self.seq_len)
-                        avg_mse_score += 1 - mse / self.mse_baseline[phase][idx]
+                    if split in ('val', 'test'):
+                        baseline = self.mse_baseline[split][idx]
+                        if count <= 0 or baseline <= 0:
+                            raise ValueError(
+                                f'{split} session {idx} has no predictions '
+                                'or has a nonpositive baseline.'
+                            )
+                        mse = self.sum_mse[split][idx].sum()
+                        mse /= count * horizon
+                        avg_mse_score += 1 - mse / baseline
 
+                if sum_pred_num <= 0:
+                    raise ValueError(
+                        f'No {split} predictions for {dataset}.'
+                    )
                 avg_mse_score /= len(session_ids)
+                if not np.isfinite((avg_mse_score, sum_mse,
+                                    sum_mae)).all():
+                    raise ValueError(
+                        f'Non-finite {split} metrics for {dataset}.'
+                    )
 
-                if phase == 'val':
-                    logger.log_tabular(f'{dataset}_{phase}_pred_num', int(sum_pred_num))
-                    logger.log_tabular(f'{dataset}_{phase}_score', avg_mse_score)
+                if split in ('val', 'test'):
+                    logger.log_tabular(
+                        f'{dataset}_{split}_pred_num', int(sum_pred_num)
+                    )
+                    logger.log_tabular(
+                        f'{dataset}_{split}_score', avg_mse_score
+                    )
                 
-                logger.log_tabular(f'{dataset}_{phase}_mse', sum_mse / sum_pred_num)
-                logger.log_tabular(f'{dataset}_{phase}_mae', sum_mae / sum_pred_num)
+                logger.log_tabular(
+                    f'{dataset}_{split}_mse', sum_mse / sum_pred_num
+                )
+                logger.log_tabular(
+                    f'{dataset}_{split}_mae', sum_mae / sum_pred_num
+                )
             
-            if is_best and len(self.sample_trials[phase]) > 0:
-                self.plot_prediction(save_path, phase)
+            if is_best and len(self.sample_trials[split]) > 0:
+                self.plot_prediction(save_path, split)
 
         if is_best:
-            for phase in ['train', 'val']:
-                if testing and phase != 'val':
-                    continue
+            for split in phases:
                 info = {
-                    'mse': self.sum_mse[phase],
-                    'mae': self.sum_mae[phase],
-                    'pred_num': self.pred_num[phase],
-                    'sample_trials': self.sample_trials[phase]
+                    'mse': self.sum_mse[split],
+                    'mae': self.sum_mae[split],
+                    'pred_num': self.pred_num[split],
+                    'sample_trials': self.sample_trials[split]
                 }
-                np.save(os.path.join(save_path, f'{phase if not testing else "test"}_best_info.npy'), info)
+                np.save(os.path.join(save_path, f'{split}_best_info.npy'), info)
 
         self._init_info()
     

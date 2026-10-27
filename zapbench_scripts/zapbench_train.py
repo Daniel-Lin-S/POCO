@@ -212,7 +212,6 @@ def train(
   log_every = 100
   i_iter = 0
 
-  infer_source = get_infer_source(context_length)
   eval_source = get_source(context_length, split='val')
   source = get_source(context_length)
   data_loader = get_data_loader(source, seed=seed, batch_size=batch_size, num_epochs=num_epochs)
@@ -279,6 +278,7 @@ def train(
           torch.save(model.state_dict(), os.path.join(save_dir, f'best.pt'))
 
   model.load_state_dict(torch.load(os.path.join(save_dir, f'best.pt')))
+  infer_source = get_infer_source(context_length)
   mae = eval(model, infer_source, context_length)
   avg_mae = get_average(mae)
 
@@ -395,7 +395,7 @@ model_dir = os.path.join(
     f"_cf{configs.compression_factor}_wd{args.weight_decay}_drop{args.poyo_unit_dropout}"
     f"_cond{args.conditioning_dim}_seed{args.seed}"
 )
-print(f"Model directory: {model_dir}")
+print(f"Model directory: {os.path.abspath(model_dir)}")
 
 # Train model
 model, mae, avg_mae = train(

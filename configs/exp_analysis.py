@@ -1,87 +1,123 @@
+"""Analyse complete POCO fits.
+
+Input is validated ``progress.txt`` and ``test.txt`` tables from hashed fit
+directories. Output figures and summary tables are stored in the configured
+artifact root's ``figures`` directory.
+"""
+
 import os
 import os.path as osp
 import numpy as np
 import pandas as pd
 import torch
 
-from configs.config_global import FIG_DIR, N_CELEGANS_SESSIONS, N_MICE_SESSIONS, N_ZEBRAFISH_SESSIONS, N_CELEGANS_FLAVELL_SESSIONS, N_ZEBRAFISH_AHNRENS_SESSIONS, DATA_DIR
+from configs.config_global import (
+    FIG_DIR, DATA_DIR, N_CELEGANS_SESSIONS, N_MICE_SESSIONS,
+    N_ZEBRAFISH_SESSIONS, N_CELEGANS_FLAVELL_SESSIONS,
+)
 from utils.config_utils import configs_dict_unpack, configs_transpose
+from utils.artifacts import validate_complete
+from utils.ahrens_sessions import (
+    equal_group_counts, processed_subject_names,
+)
 from analysis import plots, analyze_performance, analyze_embedding, tables
 from configs import experiments
 from configs.configs import NeuralPredictionConfig
 from datasets.datasets import get_baseline_performance, Zebrafish, Simulation
 
-def get_curve(cfgs, idx, key='TestLoss', max_batch=None, num_points=None, start=0):
-    """
-    Read the training curve from the configuration
-    
-    :param cfgs: a dictionary of configurations, each key corresponds to a seed, and each value is a list of configurations
-    :param idx: the index of the configuration to read
-    :param key: the key to read from the configuration
-    """
+def get_curve(cfgs, idx, key='ValLoss', max_batch=None,
+              num_points=None, start=0):
+    """Read a complete training or validation curve for every seed.
 
-    num_seeds = len(cfgs)
-    
-    if max_batch is None:
-        max_batch = cfgs[0][idx].max_batch
-    
-    eval_interval = cfgs[0][idx].log_every
-    tot_steps = max_batch // eval_interval
-    if num_points is None:
-        num_points = tot_steps
-    plot_every = tot_steps // num_points
-    performance = []
+    Parameters
+    ----------
+    cfgs : dict
+        Resolved configurations grouped by seed.
+    idx : int
+        Fit index within each seed.
+    key : str, optional
+        Metric column, default 'ValLoss'.
+    max_batch : int, optional
+        Largest training step to read, default None.
+    num_points : int, optional
+        Maximum number of points, default None.
+    start : int, optional
+        First logged row to include, default 0.
 
-    for seed in range(num_seeds):
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Metric matrix with shape ``(steps, seeds)`` and step numbers.
+    """
+    if num_points is not None and num_points < 1:
+        raise ValueError(f'num_points must be positive, got {num_points}.')
+    if start < 0:
+        raise ValueError(f'start must be nonnegative, got {start}.')
+    values = []
+    reference_steps = None
+    for seed in cfgs:
         cfg = cfgs[seed][idx]
+        if not validate_complete(cfg):
+            raise ValueError(f'Incomplete fit: {cfg.save_path}.')
+        path = osp.join(cfg.save_path, 'progress.txt')
+        table = pd.read_table(path)
+        if key not in table:
+            raise KeyError(f'Missing {key} in {path}.')
+        limit = cfg.max_batch if max_batch is None else max_batch
+        rows = table.loc[table['BatchNum'] <= limit].iloc[start:]
+        if rows.empty:
+            raise ValueError(f'No curve rows in {path}.')
+        stride = 1
+        if num_points is not None:
+            stride = max(1, int(np.ceil(len(rows) / num_points)))
+        rows = rows.iloc[::stride]
+        steps = rows['BatchNum'].to_numpy()
+        curve = rows[key].to_numpy(dtype=float)
+        if not np.isfinite(curve).all():
+            raise ValueError(f'Non-finite {key} values in {path}.')
+        if reference_steps is None:
+            reference_steps = steps
+        elif not np.array_equal(steps, reference_steps):
+            raise ValueError(f'Mismatched training steps in {path}.')
+        values.append(curve)
+    if not values:
+        raise ValueError('No fit configurations were provided.')
+    return np.stack(values, axis=1), reference_steps
 
-        try:
-            file_path = osp.join(cfg.save_path, 'progress.txt')
-            exp_data = pd.read_table(file_path)
-            acc = exp_data[key][start: tot_steps + 1: plot_every]
-            
-            if len(acc) >= (tot_steps - start) // plot_every:
-                performance.append(acc[: (tot_steps - start) // plot_every])
-            else:
-                raise ValueError
-        except:
-            print("Incomplete data:", cfg.save_path)
 
-    
-    x_axis = np.arange((start + 1) * eval_interval, max_batch + 1, plot_every * eval_interval)
-    if len(performance) == 0:
-        print("No data for", cfg.save_path, " Returning zeros")
-        performance = np.zeros_like(x_axis).reshape(-1, 1)
-    else:
-        performance = np.stack(performance, axis=1)
+def get_performance(cfgs, idx, key='TestLoss'):
+    """Read one test metric for each completed seed.
 
-    return performance, x_axis
+    Parameters
+    ----------
+    cfgs : dict
+        Resolved configurations grouped by seed.
+    idx : int
+        Fit index within each seed.
+    key : str, optional
+        Test column, default 'TestLoss'.
 
-def get_performance(
-    cfgs, idx, key='TestLoss',
-    file_name='test.txt', 
-):
+    Returns
+    -------
+    list[float]
+        Finite test values in seed order.
     """
-    Read the test performance
-    :return: a list of performance values for each seed
-    """
-
-    num_seeds = len(cfgs)
-    performance = []
-
-    for seed in range(num_seeds):
-        cfg: NeuralPredictionConfig = cfgs[seed][idx]
-        file_path = osp.join(cfg.save_path, file_name)
-        if not osp.exists(file_path):
-            print(f"File {file_path} does not exist", flush=True)
-            continue
-        try:
-            exp_data = pd.read_table(file_path)
-            performance.append(exp_data[key].iloc[-1])
-        except:
-            print("Incomplete data:", cfg.save_path)
-
-    return performance
+    values = []
+    for seed in cfgs:
+        cfg = cfgs[seed][idx]
+        if not validate_complete(cfg):
+            raise ValueError(f'Incomplete fit: {cfg.save_path}.')
+        path = osp.join(cfg.save_path, 'test.txt')
+        table = pd.read_table(path)
+        if key not in table:
+            raise KeyError(f'Missing {key} in {path}.')
+        value = float(table[key].iloc[-1])
+        if not np.isfinite(value):
+            raise ValueError(f'Non-finite {key} in {path}.')
+        values.append(value)
+    if not values:
+        raise ValueError('No fit configurations were provided.')
+    return values
 
 def compare_model_training_curves(
     cfgs, 
@@ -89,7 +125,7 @@ def compare_model_training_curves(
     mode_list = ['', ], 
     model_list = ['POYO', 'Linear', ],
     plot_model_lists = None,
-    plot_train_test_curve = False,
+    plot_train_val_curve = False,
     show_test_performance = False,
     datasets = None,
     max_batch = None,
@@ -106,7 +142,7 @@ def compare_model_training_curves(
     :param model_list: a list of models to compare
     :param plot_model_lists: If None, plot all models in model_list; 
         otherwise should be a dictionary of lists, each entry corresponds to a different plot, the key is the plot name
-    :param plot_train_test_curve: whether to plot the train/test curves
+    :param plot_train_val_curve: whether to plot the train/val curves
     :param show_test_performance: whether to show the test performance on the legend
     :param datasets: a list of datasets to plot results, if None, use all datasets in the configuration
     :param max_batch: the maximum batch to plot
@@ -134,27 +170,36 @@ def compare_model_training_curves(
             test_mae = []
 
             for k, model in enumerate(model_list):
-                test_curve, x_axis = get_curve(cfgs, k + i * len(model_list), key=f'{dataset}_val_mse', max_batch=max_batch)
-                performance.append(test_curve)
+                val_curve, x_axis = get_curve(
+                    cfgs, k + i * len(model_list),
+                    key=f'{dataset}_val_mse', max_batch=max_batch
+                )
+                performance.append(val_curve)
                 train_curve, x_axis = get_curve(cfgs, k + i * len(model_list), key=f'{dataset}_train_mse', max_batch=max_batch)
                 train_performance.append(train_curve)
 
                 if show_test_performance:
-                    test_mse.append(get_performance(cfgs, k + i * len(model_list), key=f'{dataset}_val_mse'))
-                    test_mae.append(get_performance(cfgs, k + i * len(model_list), key=f'{dataset}_val_mae'))
+                    test_mse.append(get_performance(
+                        cfgs, k + i * len(model_list),
+                        key=f'{dataset}_test_mse'
+                    ))
+                    test_mae.append(get_performance(
+                        cfgs, k + i * len(model_list),
+                        key=f'{dataset}_test_mae'
+                    ))
 
                 def baseline(plt, x_axis, linewidth, capsize, capthick):
                     if draw_baseline:
                         plt.plot(x_axis, [val_baseline_performance] * len(x_axis), color='gray', linestyle='--', linewidth=linewidth)
 
-                if plot_train_test_curve:
+                if plot_train_val_curve:
                     # compare train and test curves
                     plots.error_plot(
                         x_axis,
-                        [train_curve, test_curve],
+                        [train_curve, val_curve],
                         x_label='Training Step',
                         y_label='Train Loss',
-                        label_list=['Train', 'Test'],
+                        label_list=['Train', 'Validation'],
                         save_dir=save_dir,
                         fig_name=f'{dataset}_{mode}_{model}',
                         figsize=(5, 4),
@@ -224,7 +269,7 @@ def compare_param_analysis(
     mode_list=[''],
     save_dir='compare_param', 
     plot_model_list=None,
-    key='val_score',
+    key='test_score',
     show_chance=False,
     logarithm=False,
     key_name=None,
@@ -283,15 +328,23 @@ def compare_param_analysis(
             curves.append(performances)
 
         if show_chance:
-            if key == 'val_score':
-                val_baseline_performance = [0] * len(param_list)
+            if key == 'test_score':
+                test_baseline_performance = [0] * len(param_list)
             else:
-                val_baseline_performance = [get_baseline_performance(
-                        cfgs[0][base_idx], 'test')[f'avg_copy_{key[-3: ]}'] for j in range(len(param_list))]
+                baseline = get_baseline_performance(
+                    cfgs[0][base_idx].dataset_config[dataset_name],
+                    'test'
+                )[f'avg_copy_{key[-3:]}']
+                test_baseline_performance = [
+                    baseline for _ in param_list
+                ]
             if logarithm:
-                val_baseline_performance = np.log(val_baseline_performance)
+                test_baseline_performance = np.log(test_baseline_performance)
             def draw_baseline(plt, x_axis, linewidth, capsize, capthick):
-                plt.plot(param_list, val_baseline_performance, color='gray', linestyle='--', linewidth=linewidth)
+                plt.plot(
+                    param_list, test_baseline_performance,
+                    color='gray', linestyle='--', linewidth=linewidth
+                )
 
         if plot_model_list is not None:
             indices = [model_list.index(model) for model in plot_model_list]
@@ -318,7 +371,10 @@ def compare_param_analysis(
             legend_bbox_to_anchor=(1, 0.8), # move the legend to the right
         )
 
-def get_weighted_performance(cfgs, n_models, n_exps, exp_list, transpose=False, key='val_score', weighted=None, dataset=None, verbose=False):
+def get_weighted_performance(
+    cfgs, n_models, n_exps, exp_list, transpose=False,
+    key='test_score', weighted=None, dataset=None, verbose=False
+):
     """
     Get the weighted average performance from multiple experiments (weighted by the size of test set, or just average)
     
@@ -357,7 +413,9 @@ def get_weighted_performance(cfgs, n_models, n_exps, exp_list, transpose=False, 
             performance = get_performance(cfgs, idx, key=f'{dataset_name}_{key}')
 
             if weighted == 'pred_num':
-                weight = get_performance(cfgs, idx, key=f'{dataset_name}_val_pred_num')
+                weight = get_performance(
+                    cfgs, idx, key=f'{dataset_name}_test_pred_num'
+                )
             elif weighted == 'session':
                 id_list = cfgs[0][idx].dataset_config[dataset_name].session_ids
                 weight = len(id_list) if id_list is not None else 1
@@ -369,6 +427,11 @@ def get_weighted_performance(cfgs, n_models, n_exps, exp_list, transpose=False, 
             for k in range(valid_seeds):
                 total[k] += performance[k] * weight[k]
 
+            if len(weight) != len(performance):
+                raise ValueError(
+                    f'Weight count differs from performance count at '
+                    f'{cfgs[0][idx].save_path}.'
+                )
             if len(weight) > 1:
                 assert weight[-1] == weight[0], "Different weight for different seeds, is this expected?"
             elif len(weight) == 0:
@@ -379,8 +442,9 @@ def get_weighted_performance(cfgs, n_models, n_exps, exp_list, transpose=False, 
 
         if valid_seeds == 0:
             print("No valid seeds for", i, "model", cfgs[0][i * n_exps].model_label, "returning zeros")
-            performances.append([0])
-            continue
+            raise ValueError(
+                f'No valid seeds for {cfgs[0][i * n_exps].save_path}.'
+            )
 
         total = [x / sum_weights for x in total]
         performances.append(total[: valid_seeds])
@@ -475,7 +539,7 @@ def compare_lr_wd_analysis():
     compare_param_analysis(
         cfgs, wd_list, experiments.training_set_size_models, 'log10(Weight Decay)',
         mode_list=get_dataset_labels(experiments.dataset_list),
-        save_dir='compare_lr_wd', key_name='Validation Score',
+        save_dir='compare_lr_wd', key_name='Test Score',
     )
     
     cfgs = experiments.compare_lr()
@@ -483,38 +547,74 @@ def compare_lr_wd_analysis():
     compare_param_analysis(
         cfgs, lr_list, experiments.training_set_size_models, 'log10(Learning Rate)',
         mode_list=get_dataset_labels(experiments.dataset_list),
-        save_dir='compare_lr_wd', key_name='Validation Score',
+        save_dir='compare_lr_wd', key_name='Test Score',
     )
 
-def get_split_performance(cfgs, n_split_list, dataset_name, modes=['', 'PC'], model_list=['POCO', 'TexFilter']):
+def get_split_performance(
+    cfgs: dict, n_split_list: list[int], dataset_name: str,
+    modes: tuple[str, ...] = ('', 'PC'),
+    model_list: tuple[str, ...] = ('POCO', 'TexFilter'),
+    total_sessions: int | None = None,
+) -> None:
+    """Plot session-group performance from completed test evaluations.
+
+    Parameters
+    ----------
+    cfgs : dict
+        Resolved configurations by seed.
+    n_split_list : list[int]
+        Number of groups in each comparison condition.
+    dataset_name : str
+        Human-readable dataset name in the figure title.
+    modes : tuple[str, ...], optional
+        Recording variants, default raw and PC.
+    model_list : tuple[str, ...], optional
+        Models to compare, default POCO and TexFilter.
+    total_sessions : int or None, optional
+        Cohort size for equal-size Ahrens groups, default None.
+    """
     sum_n = sum(n_split_list)
+    if sum_n < 1:
+        raise ValueError('At least one session-group condition is required.')
+    if total_sessions is not None and any(
+        total_sessions % count for count in n_split_list
+    ):
+        raise ValueError(
+            f'Group counts {n_split_list} do not divide '
+            f'{total_sessions} sessions.'
+        )
 
     for i_mode, mode in enumerate(modes):
-        performance = [[] for _ in range(len(model_list))]
-    
+        performance = [[] for _ in model_list]
         for i, n_split in enumerate(n_split_list):
-            l = sum(n_split_list[: i]) + i_mode * sum_n
-            r = sum(n_split_list[: i + 1]) + i_mode * sum_n
+            left = sum(n_split_list[:i]) + i_mode * sum_n
+            right = left + n_split
             data = get_weighted_performance(
-                cfgs, len(model_list), sum_n * len(modes), 
-                range(l, r), transpose=True, weighted='session'
+                cfgs, len(model_list), sum_n * len(modes),
+                range(left, right), transpose=True, weighted='session',
             )
+            for model_index in range(len(model_list)):
+                performance[model_index].append(data[model_index])
 
-            for j, model in enumerate(model_list):
-                performance[j].append(data[j])
+        if total_sessions is None:
+            x_axis = list(range(len(n_split_list) - 1, -1, -1))
+            xtick_labels = [str(count) for count in n_split_list]
+            x_label = 'Number of groups'
+        else:
+            x_axis = [total_sessions // count
+                      for count in reversed(n_split_list)]
+            xtick_labels = [str(count) for count in x_axis]
+            performance = [list(reversed(row)) for row in performance]
+            x_label = 'Training sessions per fit'
 
-        x_axis = list(range(len(n_split_list) - 1, -1, -1))
-        xtick_labels = [f'{n_split}' for n_split in n_split_list]
-        
-        def draw_chance(plt, x_axis, linewidth, capsize, capthick):
-            plt.plot(x_axis, [0] * len(x_axis), color='gray', linestyle='--', linewidth=linewidth)
-
-        colors = plots.get_model_colors(model_list)
         plots.error_plot(
-            x_axis, performance, x_label='Number of splits', y_label='Prediction Score',
-            label_list=model_list, save_dir='compare_training_set_size', fig_name=f'splits_vs_score_{dataset_name}_{mode}',
-            xticks=x_axis, xticks_labels=xtick_labels, colors=colors, # extra_lines=draw_chance, 
-            title=f'{dataset_name} {mode} ({max(n_split_list)} Sessions)'
+            x_axis, performance, x_label=x_label,
+            y_label='Prediction Score', label_list=model_list,
+            save_dir='compare_training_set_size',
+            fig_name=f'splits_vs_score_{dataset_name}_{mode}',
+            xticks=x_axis, xticks_labels=xtick_labels,
+            colors=plots.get_model_colors(model_list),
+            title=f'{dataset_name} {mode} ({max(n_split_list)} Sessions)',
         )
 
 def compare_models_multiple_splits_analysis():
@@ -530,40 +630,72 @@ def compare_models_multiple_splits_analysis():
     n_split_list = [1, 2, 3, 5, 10, 19]
     get_split_performance(cfgs, n_split_list, 'Fish (Deisseroth)', ['', 'PC'])
 
-    cfgs = experiments.compare_models_multiple_splits_zebrafish_ahrens()
-    n_split_list = [1, 2, 3, 5, 8, 15]
-    get_split_performance(cfgs, n_split_list, 'Fish (Ahrens)', ['', 'PC'])
+    compare_models_multiple_splits_zebrafish_ahrens_analysis()
+    compare_models_multiple_splits_zebrafish_ahrens_lowpass_analysis()
 
-    cfgs = experiments.compare_models_multiple_splits_zebrafish_ahrens_lowpass()
-    get_split_performance(cfgs, n_split_list, 'Fish (Ahrens)', ['lowpass', 'lowpass PC'])
+
+def compare_models_multiple_splits_zebrafish_ahrens_analysis() -> None:
+    """Plot equal-size Ahrens session groups for raw and PC activity."""
+    cfgs = experiments.compare_models_multiple_splits_zebrafish_ahrens()
+    counts = equal_group_counts(len(processed_subject_names()))
+    get_split_performance(
+        cfgs, counts, 'Fish (Ahrens)', ('', 'PC'),
+        total_sessions=len(processed_subject_names()),
+    )
+
+
+def compare_models_multiple_splits_zebrafish_ahrens_lowpass_analysis() -> None:
+    """Plot equal-size Ahrens groups after low-pass processing."""
+    cfgs = (
+        experiments.compare_models_multiple_splits_zebrafish_ahrens_lowpass()
+    )
+    counts = equal_group_counts(len(processed_subject_names()))
+    get_split_performance(
+        cfgs, counts, 'Fish (Ahrens)',
+        ('lowpass', 'lowpass PC'),
+        total_sessions=len(processed_subject_names()),
+    )
 
 def compare_train_length_analysis():
     cfgs = experiments.compare_train_length_celegans_flavell()
     train_length_list = [256, 512, 768, 1024, 1536, ]
     compare_param_analysis(
         cfgs, np.log2(train_length_list), experiments.training_set_size_models, 'log2(training recording length)', 
-        mode_list=['Worm (Flavell)', 'Worm (Flavell), Low-pass Filtered', ], save_dir='compare_training_set_size', key_name='Validation Score',
+        mode_list=[
+            'Worm (Flavell)', 'Worm (Flavell), Low-pass Filtered'
+        ], save_dir='compare_training_set_size',
+        key_name='Test Score',
     )
 
     cfgs = experiments.compare_train_length_mice()
     train_length_list = [256, 512, 1024, 2048, 4096, 8192, 16394]
     compare_param_analysis(
         cfgs, np.log2(train_length_list), experiments.training_set_size_models, 'log2(training recording length)',
-        mode_list=['Mice', 'Mice, Low-pass Filtered', ], save_dir='compare_training_set_size', key_name='Validation Score',
+        mode_list=['Mice', 'Mice, Low-pass Filtered'],
+        save_dir='compare_training_set_size', key_name='Test Score',
     )
 
     cfgs = experiments.compare_train_length_zebrafish() 
     train_length_list = [256, 512, 1024, 1536, 2048, 3072]
     compare_param_analysis(
         cfgs, np.log2(train_length_list), experiments.training_set_size_models, 'log2(training recording length)',
-        mode_list=['Fish (Deisseroth)', 'Fish PC (Deisseroth)',], save_dir='compare_training_set_size', key_name='Validation Score',
+        mode_list=['Fish (Deisseroth)', 'Fish PC (Deisseroth)'],
+        save_dir='compare_training_set_size', key_name='Test Score',
     )
 
+    compare_train_length_zebrafish_ahrens_analysis()
+
+
+def compare_train_length_zebrafish_ahrens_analysis() -> None:
+    """Plot Ahrens recording-length scaling only."""
     cfgs = experiments.compare_train_length_zebrafish_ahrens()
     train_length_list = [256, 512, 1024, 1536, 2048, 3072]
     compare_param_analysis(
         cfgs, np.log2(train_length_list), experiments.training_set_size_models, 'log2(training recording length)',
-        mode_list=['Fish PC (Ahrens)', 'Fish PC (Ahrens), Low-pass Filtered',], save_dir='compare_training_set_size', key_name='Validation Score',
+        mode_list=[
+            'Fish PC (Ahrens)', 'Fish PC (Ahrens), Low-pass Filtered'
+        ], save_dir='compare_training_set_size',
+        key_name='Test Score',
     )
 
 def compare_dataset_filter_analysis():
@@ -676,9 +808,9 @@ def get_dataset_labels(dataset_list):
 
 def compare_models_analysis():
 
-    for key in ['val_score', 'val_mae', 'val_mse']:
+    for key in ['test_score', 'test_mae', 'test_mse']:
 
-        weighted_mode = None if key == 'val_score' else 'pred_num'
+        weighted_mode = None if key == 'test_score' else 'pred_num'
         kwargs = {'key': key, 'weighted': weighted_mode, 'transpose': True}
 
         performances = {}
@@ -778,7 +910,8 @@ def compare_models_analysis():
         set_performance(
             get_weighted_performance(
                 cfgs, len(single_session_model_list),
-                N_ZEBRAFISH_AHNRENS_SESSIONS, range(N_ZEBRAFISH_AHNRENS_SESSIONS), **kwargs
+                len(processed_subject_names()),
+                range(len(processed_subject_names())), **kwargs
             ),
             single_session_model_list, 'zebrafishahrens_pc'
         )
@@ -788,7 +921,7 @@ def compare_models_analysis():
         plot_models = multi_session_model_list
         performance = retrieve_performance(plot_models, plot_datasets)
 
-        if key == 'val_score':
+        if key == 'test_score':
             plots.grouped_plot(
                 performance, group_labels=get_dataset_labels(plot_datasets),
                 bar_labels=plot_models, colors=plots.get_model_colors(plot_models),
@@ -801,10 +934,10 @@ def compare_models_analysis():
         tables.summarize_model_performance_latex(
             performance, plot_models, get_dataset_labels(plot_datasets), 
             save_dir='compare_models_all', table_name=f'compare_models_all_{key}', 
-            precision=3, best='max' if key == 'val_score' else 'min',
+            precision=3, best='max' if key == 'test_score' else 'min',
         )
 
-        if key == 'val_score':
+        if key == 'test_score':
             # zebrafish only
             plot_datasets = ['zebrafish_pc', 'zebrafishahrens_pc', ]
             plot_models = ['All_POCO', '2Datasets_POCO', 'MS_POCO', ]
@@ -885,7 +1018,7 @@ def compare_models_zebrafish_single_neuron_analysis():
     dataset_list = experiments.large_dataset_list
     performances = {}
 
-    for key in ['val_score', 'val_mae', 'val_mse']:
+    for key in ['test_score', 'test_mae', 'test_mse']:
 
         for i_data, dataset in enumerate(dataset_list):
             performance_list = get_weighted_performance(
@@ -897,7 +1030,7 @@ def compare_models_zebrafish_single_neuron_analysis():
         plot_model_list = experiments.single_neuron_model_list
         performance = [[performances[dataset][i] for dataset in plot_datasets] for i in range(len(plot_model_list))]
         
-        if key == 'val_score':
+        if key == 'test_score':
             plots.grouped_plot(
                 performance, group_labels=get_dataset_labels(plot_datasets),
                 bar_labels=model_list, colors=plots.get_model_colors(['MS_' + model for model in plot_model_list]),
@@ -910,7 +1043,7 @@ def compare_models_zebrafish_single_neuron_analysis():
         tables.summarize_model_performance_latex(
             performance, ['MS_' + model for model in plot_model_list], get_dataset_labels(plot_datasets),
             save_dir='compare_models_all', table_name=f'compare_models_zebrafish_single_neuron_{key}',
-            precision=3, best='max' if key == 'val_score' else 'min',
+            precision=3, best='max' if key == 'test_score' else 'min',
         )
 
 def compare_models_sim_analysis():
@@ -1113,17 +1246,20 @@ def compare_baseline_model_size_analysis():
     tsmixer_cfgs = experiments.tsmixer_compare_ffdim()
     model_list = [f'TSMixer {n}' for n in [64, 128, 256, 512]]
     dataset_list = ['zebrafish_pc', 'zebrafishahrens_pc', 'mice', ]
-    n_total_sessions = 19 + 12 + 15
+    ahrens_count = len(processed_subject_names())
+    n_total_sessions = 19 + 12 + ahrens_count
 
     performances = {}
     performances['zebrafish_pc'] = get_weighted_performance(
         tsmixer_cfgs, len(model_list), n_total_sessions, range(19), transpose=True,
     )
     performances['zebrafishahrens_pc'] = get_weighted_performance(
-        tsmixer_cfgs, len(model_list), n_total_sessions, range(19, 19 + 15), transpose=True,
+        tsmixer_cfgs, len(model_list), n_total_sessions,
+        range(19, 19 + ahrens_count), transpose=True,
     )
     performances['mice'] = get_weighted_performance(
-        tsmixer_cfgs, len(model_list), n_total_sessions, range(19 + 15, n_total_sessions), transpose=True,
+        tsmixer_cfgs, len(model_list), n_total_sessions,
+        range(19 + ahrens_count, n_total_sessions), transpose=True,
     )
 
     other_cfgs = experiments.compare_baseline_size()
@@ -1315,7 +1451,8 @@ def detailed_performance_analysis():
 
     for i_model, model in enumerate(model_list):
         performance = get_weighted_performance(
-            cfgs, N_ZEBRAFISH_AHNRENS_SESSIONS, len(model_list), [i_model]
+            cfgs, len(processed_subject_names()),
+            len(model_list), [i_model]
         )
         session_performances['zebrafishahrens_pc_' + model] = np.mean(performance, axis=1)
 

@@ -1,7 +1,18 @@
+"""Resolve model and dataset labels into scientific fit configurations.
+
+Input is a dictionary of configurations grouped by seed. Output is the
+same dictionary with dataset settings, model settings, and hash-named
+artifact paths assigned to each fit.
+"""
+
 import os
 import os.path as osp
 import logging
 from configs.configs import NeuralPredictionConfig, DatasetConfig
+from utils.artifacts import assign_fit_path
+from utils.ahrens_sessions import (
+    processed_subject_names, resolve_subject_selector,
+)
 
 sampling_freqs = {
     'zebrafish': 1,
@@ -20,8 +31,11 @@ def configure_dataset(configs: dict, control_time_scale=False):
     - dataset_type: the type of the dataset (e.g. pc, fc, avg)
     - session_id: the id of the session (e.g. 0, 1, 2), if not specified, all sessions are used
         alternatively, the session_id can be a range (e.g. 0-2 represents sessions 0, 1)
+        Ahrens selectors use subject names joined with +; legacy positional
+        labels resolve to explicit subject names before fit hashing.
     """
 
+    available_ahrens_subjects = {}
     for seed, config_list in configs.items():
         for config in config_list:
             config: NeuralPredictionConfig
@@ -38,7 +52,10 @@ def configure_dataset(configs: dict, control_time_scale=False):
                 session_id_2 = label.split('-')[2] if len(label.split('-')) > 2 else None
                 label_prefix = label.split('-')[0]
                 dataset_name = label_prefix.split('_')[0]
-                dataset_type = label_prefix.split('_')[1] if len(label.split('_')) > 1 else None
+                dataset_type = (
+                    label_prefix.split('_')[1]
+                    if len(label_prefix.split('_')) > 1 else None
+                )
                 dataset_config = DatasetConfig()
 
                 dataset_config.batch_size = config.batch_size
@@ -47,7 +64,7 @@ def configure_dataset(configs: dict, control_time_scale=False):
                 dataset_config.seq_length = config.seq_length
                 dataset_config.train_data_length = config.train_data_length if hasattr(config, 'train_data_length') else int(1e9)
 
-                if session_id is not None:
+                if session_id is not None and dataset_name != 'zebrafishahrens':
                     if session_id == '*':
                         assert dataset_name == 'zebrafish'
                         dataset_config.session_ids = [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17] 
@@ -145,10 +162,22 @@ def configure_dataset(configs: dict, control_time_scale=False):
                 if config.dataset_filter is not None: # overwrite the filter type, if specified
                     dataset_config.filter_type = config.dataset_filter
 
+                if dataset_name == 'zebrafishahrens':
+                    selector = label.partition('-')[2] or None
+                    filter_type = dataset_config.filter_type
+                    if filter_type not in available_ahrens_subjects:
+                        available_ahrens_subjects[filter_type] = (
+                            processed_subject_names(filter_type)
+                        )
+                    available = available_ahrens_subjects[filter_type]
+                    dataset_config.session_ids = (
+                        resolve_subject_selector(selector, available)
+                    )
                 dataset_config.dataset = config.dataset[-1]
                 config.dataset_config[label] = dataset_config
 
             config.mod_w = [1] * len(config.dataset)
+            assign_fit_path(config)
 
     return configs
 

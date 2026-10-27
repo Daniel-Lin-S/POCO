@@ -1,6 +1,12 @@
+"""Provide training helpers and the training-stage marker.
+
+Input is a model or resolved fit path. ``train_complete.txt`` records the
+end of parameter fitting; final completion is recorded after test evaluation
+by ``utils.artifacts``.
+"""
+
 import os
 import os.path as osp
-import torch.nn as nn
 import logging
 
 from torch.nn.utils import clip_grad_norm_
@@ -48,12 +54,6 @@ def log_complete(exp_path: str, start_time=None):
     
     logging.info(f'Training is complete at: {complete_time.strftime("%Y-%m-%d %H:%M:%S")}')
 
-
-def get_grad_norm(model: nn.Module):
-    g = 0
-    for param in model.parameters():
-        g += param.grad.square().sum()
-    return g
 
 def task_init(config_: BaseConfig, input_size=None):
     """initialize tasks"""

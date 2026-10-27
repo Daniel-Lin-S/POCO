@@ -1,10 +1,16 @@
+"""Expand experiment configurations and prepare fit directories.
+
+Input is a resolved scientific configuration. Output is ``config.json``
+inside a hash-named fit directory. Incomplete directories are quarantined
+before a fresh fit is prepared.
+"""
+
 import logging
 import os
 import json
 from copy import deepcopy
 
 import numpy as np
-import pandas as pd
 
 from configs.config_global import ROOT_DIR
 
@@ -67,40 +73,33 @@ def auto_name(configs_dict, config_diffs):
     return new_config_dict
 
 
-def save_config(config, save_path, also_save_as_text=True, show_message=True):
+def save_config(config, save_path: str,
+                show_message: bool = True) -> bool:
+    """Prepare a new fit and save its resolved configuration.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fully resolved fit configuration.
+    save_path : str
+        Absolute fit directory.
+    show_message : bool, optional
+        Log a skipped complete fit, default True.
+
+    Returns
+    -------
+    bool
+        True when the fit is new and should train.
     """
-    Save config.
-    adapted from https://github.com/gyyang/olfaction_evolution
-    return True if the save path is new, False if training is already done
-    """
-    if os.path.exists(save_path):
-        file_path = os.path.join(save_path, 'progress.txt')
-        if not config.overwrite and os.path.exists(file_path):
-            try:
-                exp_data = pd.read_table(file_path)
-                # TODO: check the last line of the file
-                if len(exp_data.index) >= config.max_batch // config.log_every and os.path.exists(os.path.join(save_path, 'test.txt')):
-                    if show_message:
-                        logging.warning('Save dir {} already exists and training is already done. '.format(save_path)
-                                + 'Skipped. (to overwrite use -o)')
-                    return False
-            except:
-                pass
-        
+    from utils.artifacts import prepare_fit
+
+    if not prepare_fit(config):
         if show_message:
-            logging.warning('Save dir {} already exists!'.format(save_path)
-                            + 'Storing info there anyway. ')
-    else:
-        os.makedirs(save_path)
-
+            logging.info('Skipping active or completed fit: %s', save_path)
+        return False
     config_dict = config.to_dict()
-    with open(os.path.join(save_path, 'config.json'), 'w') as f:
-        json.dump(config_dict, f, indent=4)
-
-    if also_save_as_text:
-        with open(os.path.join(save_path, 'config.txt'), "w") as f:
-            for k, v in config_dict.items():
-                f.write(str(k) + ' >>> ' + str(v) + '\n\n')
+    with open(os.path.join(save_path, 'config.json'), 'x') as stream:
+        json.dump(config_dict, stream, indent=2)
     return True
 
 import configs.configs

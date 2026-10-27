@@ -1,6 +1,12 @@
+"""Write one tab-separated metric table per fit phase.
+
+Input is a sequence of named numeric rows. Output is ``progress.txt`` for
+training and validation or ``test.txt`` for the final test evaluation.
+Existing metric tables are never replaced.
+"""
+
 import os
 import os.path as osp
-import time
 import atexit
 
 color2num = dict(
@@ -33,39 +39,29 @@ def colorize(string, color, bold=False, highlight=False):
 
 
 class Logger:
-    """
-    A general-purpose logger.
-    adapted from https://github.com/openai/spinningup
+    """Write one tabular metric file without replacing prior results."""
+    def __init__(self, output_dir: str,
+                 output_fname: str = 'progress.txt') -> None:
+        """Prepare a metric writer without creating an empty table.
 
-    Makes it easy to save diagnostics, hyperparameter configurations, the
-    state of a training run, and the trained model.
-    """
-    def __init__(self, output_dir=None, output_fname='progress.txt', exp_name=None):
+        Parameters
+        ----------
+        output_dir : str
+            Absolute fit directory.
+        output_fname : str, optional
+            Metric file name, default 'progress.txt'.
         """
-        Initialize a Logger.
-
-        Args:
-            output_dir (string): A directory for saving results to. If
-                ``None``, defaults to a temp directory of the form
-                ``/tmp/experiments/somerandomnumber``.
-
-            output_fname (string): Name for the tab-separated-value file
-                containing metrics logged throughout a training run.
-                Defaults to ``progress_exp_name.txt``.
-
-            exp_name (string): Experiment name. If you run multiple training
-                runs and give them all the same ``exp_name``, the plotter
-                will know to group them. (Use case: if you run the same
-                hyperparameter configuration with multiple random seeds, you
-                should give them all the same ``exp_name``.)
-        """
-        self.exp_name = exp_name
+        if output_dir is None:
+            raise ValueError('Logger output_dir must be absolute.')
+        if not osp.isabs(output_dir):
+            raise ValueError(
+                f'Logger output_dir must be absolute: {output_dir}'
+            )
         self.output_dir = output_dir
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
-        self.output_file = open(osp.join(self.output_dir, output_fname), 'w')
-        atexit.register(self.output_file.close)
-        print(colorize("Logging data to {}".format(self.output_file.name), 'green', bold=True))
+        self.output_path = osp.join(self.output_dir, output_fname)
+        self.output_file = None
         self.first_row = True
         self.log_headers = []
         self.log_current_row = {}
@@ -94,6 +90,14 @@ class Logger:
 
         Writes both to stdout, and to the output file.
         """
+        if not self.log_headers:
+            raise ValueError('No metrics are available to write.')
+        if self.output_file is None:
+            self.output_file = open(self.output_path, 'x')
+            atexit.register(self.output_file.close)
+            print(colorize(
+                f'Logging data to {self.output_path}', 'green', bold=True
+            ))
         vals = []
         key_lens = [len(key) for key in self.log_headers]
         max_key_len = max(15, max(key_lens))

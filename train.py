@@ -1,3 +1,11 @@
+"""Train and evaluate one resolved POCO fit.
+
+Input is ``config.json`` in a hashed fit directory. Training writes
+``progress.txt`` with train and validation columns, a validation-selected
+``net_best.pth``, and ``flops.json``. Final evaluation writes ``test.txt``
+with the same objective on the test split and a validated ``complete.json``.
+"""
+
 import logging
 import os.path as osp
 import random
@@ -9,90 +17,166 @@ import torch.optim.lr_scheduler as lrs
 import time
 
 from configs.config_global import LOG_LEVEL, NP_SEED, TCH_SEED, USE_CUDA, DATA_DIR
-from configs.configs import BaseConfig, SupervisedLearningBaseConfig, NeuralPredictionConfig
+from configs.configs import (SupervisedLearningBaseConfig,
+                             NeuralPredictionConfig)
 from datasets.dataloader import DatasetIters
 from tasks.taskfunctions import TaskFunction
 from models.model_utils import model_init
 from utils.config_utils import load_config
 from utils.logger import Logger
-from utils.train_utils import (get_grad_norm, grad_clipping, task_init, log_complete)
+from utils.artifacts import (mark_complete, validate_complete,
+                             locked_fit, fit_lock)
+from utils.flops import measure_train_step
+import json
+from pathlib import Path
+from utils.train_utils import grad_clipping, task_init, log_complete
 from datetime import datetime
 
-def train_from_path(path):
+LOG_LOSS_EPSILON = 1e-4
+
+def train_from_path(path: str) -> None:
     """Train from a path with a config file in it."""
     logging.basicConfig(level=LOG_LEVEL)
     config = load_config(path)
     model_train(config)
 
-def eval_from_path(path):
-    """Evaluate from a path with a config file in it."""
+def eval_from_path(path: str) -> None:
+    """Evaluate an incomplete fit from its saved configuration."""
     logging.basicConfig(level=LOG_LEVEL)
     config = load_config(path)
-    model_eval(config)
+    complete_evaluation(config)
+
+def require_positive_weights(weights: list[float]) -> None:
+    """Reject empty, non-finite, or nonpositive dataset weights.
+
+    Parameters
+    ----------
+    weights : list[float]
+        One objective weight per dataset.
+    """
+    if not weights or not np.isfinite(weights).all():
+        raise ValueError('Dataset weights must be finite and nonempty.')
+    if any(weight <= 0 for weight in weights):
+        raise ValueError('Dataset weights must be positive.')
+
 
 def evaluate_performance(
     net: nn.Module, 
     config: SupervisedLearningBaseConfig, 
-    test_data: DatasetIters, 
+    eval_data: DatasetIters,
     task_func: TaskFunction, 
     logger: Logger, 
-    testloss_list: list = [], 
+    validation_losses: list = None,
     i_b: int = 0,
-    train_loss: float = 0,
-    phase: str = 'val',
-    testing: bool = False
-):
-    """
-    Test the model. Print the test loss and accuracy through logger. Save the model if it is the best model.
+    phase: str = 'val'
+) -> None:
+    """Measure validation or test loss and save the best validation model.
+
+    Parameters
+    ----------
+    net : nn.Module
+        Model evaluated without gradient updates.
+    config : SupervisedLearningBaseConfig
+        Resolved fit configuration.
+    eval_data : DatasetIters
+        Validation or test iterator.
+    task_func : TaskFunction
+        Prediction task and metrics.
+    logger : Logger
+        Split-specific metric writer.
+    validation_losses : list, optional
+        Prior validation losses, default None.
+    i_b : int, optional
+        Training step, default 0.
+    phase : str, optional
+        Evaluation phase, default 'val'.
     """
 
+    require_positive_weights(config.mod_w)
+    if phase not in ('val', 'test'):
+        raise ValueError(f'Expected val or test phase, got {phase}.')
+    if phase == 'val' and validation_losses is None:
+        raise ValueError('Validation requires a loss history.')
     net.eval()
     start = time.time()
     with torch.no_grad():
 
-        test_data.reset()
+        eval_data.reset()
         all_loss = 0
+        batch_count = 0
 
-        for i_tloader, test_iter in enumerate(test_data.data_iters):
+        for i_tloader, eval_iter in enumerate(eval_data.data_iters):
             total = 0
-            test_loss = 0.0
+            weighted_loss = 0.0
             while True:
                 try:
-                    t_data = next(test_iter)
-                    t_data = get_full_input(t_data, i_tloader, config, test_data.input_sizes)
+                    t_data = next(eval_iter)
+                    batch_count += 1
+                    t_data = get_full_input(
+                        t_data, i_tloader, config, eval_data.input_sizes
+                    )
                     result = task_func.roll(net, t_data, phase)
                     loss, num = result[: 2]
-                    test_loss += loss.item() * num
+                    weighted_loss += loss.item() * num
                     total += num
                 except StopIteration:
                     break
-            dataset_loss = test_loss / total
+            if total == 0:
+                raise ValueError(
+                    f'No predictions for {phase} dataset {i_tloader}.'
+                )
+            dataset_loss = weighted_loss / total
             if config.log_loss:
-                dataset_loss = np.log(dataset_loss + 1e-4)
+                dataset_loss = np.log(dataset_loss + LOG_LOSS_EPSILON)
             all_loss += dataset_loss * config.mod_w[i_tloader]
-        avg_testloss = all_loss / sum(config.mod_w)
+        eval_loss = all_loss
     
     eval_time = time.time() - start
-    logging.info('Avg inference time per batch: {:.1f} ms'.format(eval_time * 1000 / len(test_data.data_loaders[0].dataset) * config.batch_size))
-    logger.log_tabular('TestLoss', avg_testloss)
-    testloss_list.append(avg_testloss)
+    logging.info(
+        'Avg inference time per batch: %.1f ms',
+        eval_time * 1000 / batch_count
+    )
+    if not np.isfinite(eval_loss):
+        raise ValueError(f'{phase} loss is non-finite.')
+    logger.log_tabular(f'{phase.capitalize()}Loss', eval_loss)
+    if phase == 'val':
+        validation_losses.append(eval_loss)
 
-    # save the model with best testing loss
-    if not testing:
+    if phase == 'val':
         best = False
-        if avg_testloss <= min(testloss_list):
+        if eval_loss <= min(validation_losses):
             best = True
             torch.save(net.state_dict(), osp.join(config.save_path, 'net_best.pth'))
     else:
         best = True
 
     task_func.after_testing_callback(
-        logger=logger, save_path=config.save_path, is_best=best, batch_num=i_b, testing=testing
+        logger=logger, save_path=config.save_path, is_best=best,
+        batch_num=i_b, phase=phase
     )
 
-def get_full_input(batch, dataset_idx, config: NeuralPredictionConfig, input_sizes):
-    """
-    Use the input list for one dataset to create the full input list for all datasets.
+def get_full_input(
+    batch: tuple, dataset_idx: int,
+    config: NeuralPredictionConfig, input_sizes: list[list[int]]
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[dict]]:
+    """Insert zero-batch placeholders for inactive sessions.
+
+    Parameters
+    ----------
+    batch : tuple
+        Per-session input and target tensors, each shaped
+        ``(time, batch, units)``, plus session metadata.
+    dataset_idx : int
+        Index of the active dataset.
+    config : NeuralPredictionConfig
+        Sequence lengths used for empty placeholders.
+    input_sizes : list[list[int]]
+        Unit counts per session, grouped by dataset.
+
+    Returns
+    -------
+    tuple[list[torch.Tensor], list[torch.Tensor], list[dict]]
+        Input, target, and metadata lists for all sessions.
     """
     # prepare an empty list
     input_size_list = list(itertools.chain(*input_sizes))
@@ -118,14 +202,75 @@ def get_full_input(batch, dataset_idx, config: NeuralPredictionConfig, input_siz
 
     return input_list, target_list, info_list
 
-def model_train(config: NeuralPredictionConfig):
+def forward_backward(
+    config: NeuralPredictionConfig, net: nn.Module,
+    optimizer: torch.optim.Optimizer, task_func: TaskFunction,
+    train_data: DatasetIters
+) -> tuple[torch.Tensor, int]:
+    """Run the weighted training loss and backward pass on one batch.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit configuration.
+    net : nn.Module
+        Neural model.
+    optimizer : torch.optim.Optimizer
+        Optimizer whose gradients are cleared.
+    task_func : TaskFunction
+        Prediction loss task.
+    train_data : DatasetIters
+        Active training iterators.
+
+    Returns
+    -------
+    tuple[torch.Tensor, int]
+        Scalar loss and actual number of training examples.
     """
-    The main training function. 
-    This function initializes the task, dataset, network, optimizer, and learning rate scheduler.
-    It then trains the network and logs the performance.
+    optimizer.zero_grad()
+    loss = 0.0
+    examples = 0
+    for i_loader, train_iter in enumerate(train_data.data_iters):
+        data = next(train_iter)
+        data = get_full_input(
+            data, i_loader, config, train_data.input_sizes
+        )
+        examples += sum(x.shape[1] for x in data[0])
+        dataset_loss = task_func.roll(net, data, 'train')
+        if config.log_loss:
+            dataset_loss = torch.log(dataset_loss + LOG_LOSS_EPSILON)
+        loss += dataset_loss * config.mod_w[i_loader]
+    expected = sum(loader.batch_size for loader in train_data.data_loaders)
+    if examples != expected:
+        raise ValueError(
+            f'Expected {expected} training examples, got {examples}.'
+        )
+    if not torch.isfinite(loss).all():
+        raise ValueError('Weighted training loss is non-finite.')
+    loss.backward()
+    return loss, examples
+
+@locked_fit
+def model_train(config: NeuralPredictionConfig) -> None:
+    """Fit, validate, test, and finalise one neural prediction model.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Resolved fit configuration with a prepared directory.
     """
 
-    total_train_time = 0.0
+    if validate_complete(config):
+        logging.info('Skipping completed fit: %s', config.save_path)
+        return
+    require_positive_weights(config.mod_w)
+    contents = {path.name for path in
+                Path(config.save_path).iterdir()}
+    if contents != {'config.json'}:
+        raise RuntimeError(
+            f'Incomplete fit directory contains {sorted(contents)}; '
+            'prepare it through main.py before retraining.'
+        )
     start_time = time.time()
 
     np.random.seed(NP_SEED + config.seed)
@@ -139,18 +284,24 @@ def model_train(config: NeuralPredictionConfig):
         logging.info("training with GPU")
 
     # initialize logger
-    logger = Logger(output_dir=config.save_path,
-                    exp_name=config.experiment_name)
+    logger = Logger(output_dir=config.save_path)
 
+    if config.max_batch < 1 or config.log_every < 1:
+        raise ValueError(
+            f'Expected positive max_batch and log_every, got '
+            f'{config.max_batch} and {config.log_every}.'
+        )
     # initialize dataset
     train_data = DatasetIters(config, 'train')
+    if train_data.min_iter_len == 0:
+        raise ValueError('Training dataset has no complete batches.')
     assert config.perform_val
-    test_data = DatasetIters(config, 'val')
-    test_baseline_performance = test_data.get_baselines()
+    val_data = DatasetIters(config, 'val')
+    val_baselines = val_data.get_baselines()
 
     # initialize task
     task_func: TaskFunction = task_init(config, train_data.input_sizes)
-    task_func.mse_baseline['val'] = test_baseline_performance
+    task_func.mse_baseline['val'] = val_baselines
 
     # initialize model
     net = model_init(config, train_data.input_sizes, train_data.unit_types)
@@ -184,10 +335,10 @@ def model_train(config: NeuralPredictionConfig):
             raise NotImplementedError('scheduler_type must be specified')
 
     i_b = 0
-    i_log = 0
-    testloss_list = []
+    validation_losses = []
     break_flag = False
     train_loss = 0.0
+    train_examples_seen = 0
 
     for epoch in range(config.num_ep):
         train_data.reset()
@@ -199,36 +350,44 @@ def model_train(config: NeuralPredictionConfig):
             if (i_b + 1) % config.save_every == 0:
                 torch.save(net.state_dict(), osp.join(config.save_path, 'net_{}.pth'.format(i_b + 1)))
 
-            loss = 0.0
-            optimizer.zero_grad()
-
-            for i_loader, train_iter in enumerate(train_data.data_iters):
-                mod_weight = config.mod_w[i_loader]
-                data = next(train_iter)
-                data = get_full_input(data, i_loader, config, train_data.input_sizes)
-                dataset_loss = task_func.roll(net, data, 'train')
-                if config.log_loss:
-                    dataset_loss = torch.log(dataset_loss + 1e-4)
-                loss += dataset_loss * mod_weight
-
-            loss.backward()
+            if i_b == 0:
+                flops, (loss, examples) = measure_train_step(
+                    lambda: forward_backward(
+                        config, net, optimizer, task_func, train_data
+                    )
+                )
+                flops['training_examples_in_measured_step'] = examples
+                flops['trainable_parameters'] = param_count
+                with open(osp.join(config.save_path, 'flops.json'), 'x') as f:
+                    json.dump(flops, f, indent=2)
+            else:
+                loss, examples = forward_backward(
+                    config, net, optimizer, task_func, train_data
+                )
             # gradient clipping
             if config.grad_clip is not None:
                 grad_clipping(net, config.grad_clip)
 
             optimizer.step()
-            train_loss += loss.item()            
+            train_loss += loss.item()
+            train_examples_seen += examples
 
             # log performance
-            if i_b % config.log_every == config.log_every - 1:
+            log_count = i_b % config.log_every + 1
+            if (log_count == config.log_every or
+                    i_b + 1 == config.max_batch):
 
                 logger.log_tabular('Epoch', epoch)
                 logger.log_tabular('BatchNum', i_b + 1)
-                logger.log_tabular('DataNum', (i_b + 1) * config.batch_size * train_data.num_datasets)
-                logger.log_tabular('TrainLoss', train_loss / config.log_every)
+                logger.log_tabular(
+                    'TrainExamplesSeen', train_examples_seen
+                )
+                logger.log_tabular('TrainLoss', train_loss / log_count)
 
-                evaluate_performance(net, config, test_data, task_func, logger, testloss_list, i_b + 1, train_loss / config.log_every)
-                i_log += 1
+                evaluate_performance(
+                    net, config, val_data, task_func, logger,
+                    validation_losses, i_b + 1
+                )
                 logger.dump_tabular()
                 train_loss = 0
 
@@ -243,26 +402,65 @@ def model_train(config: NeuralPredictionConfig):
         if break_flag:
             break
 
-    total_train_time += time.time() - start_time
-    logging.info('Total training time: {:.2f} mins'.format(total_train_time / 60))
+    if i_b != config.max_batch:
+        raise RuntimeError(
+            f'Expected {config.max_batch} training steps, got {i_b}.'
+        )
+    duration_min = (time.time() - start_time) / 60
+    logging.info('Total training time: %.2f mins', duration_min)
 
     task_func.after_training_callback(config, net)
     log_complete(config.save_path, train_start_time)
 
     if config.perform_test:
         model_eval(config)
+        mark_complete(config)
 
-def model_eval(config: SupervisedLearningBaseConfig):
+def complete_evaluation(config: NeuralPredictionConfig) -> None:
+    """Evaluate and finalise a trained fit under its exclusive lock.
+
+    Parameters
+    ----------
+    config : SupervisedLearningBaseConfig
+        Fit configuration with completed training artifacts.
+    """
+    with fit_lock(config):
+        if validate_complete(config):
+            return
+        model_eval(config)
+        mark_complete(config)
+
+
+def model_eval(config: NeuralPredictionConfig) -> None:
+    """Evaluate the validation-selected checkpoint on the test split.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit configuration with a saved best checkpoint.
+    """
+    if validate_complete(config):
+        logging.info('Skipping completed fit: %s', config.save_path)
+        return
     np.random.seed(NP_SEED)
     torch.manual_seed(TCH_SEED)
     random.seed(config.seed)
 
     test_data = DatasetIters(config, 'test')
     task_func: TaskFunction = task_init(config, test_data.input_sizes)
-    task_func.mse_baseline['val'] = test_data.get_baselines()
+    task_func.mse_baseline['test'] = test_data.get_baselines()
     net = model_init(config, test_data.input_sizes, test_data.unit_types)
     net.load_state_dict(torch.load(osp.join(config.save_path, 'net_best.pth'), weights_only=True))
 
-    logger = Logger(output_dir=config.save_path, output_fname='test.txt', exp_name=config.experiment_name)
-    evaluate_performance(net, config, test_data, task_func, logger, testing=True)
+    test_path = osp.join(config.save_path, 'test.txt')
+    if osp.exists(test_path):
+        raise FileExistsError(
+            f'Test results already exist for incomplete fit: {test_path}'
+        )
+    logger = Logger(
+        output_dir=config.save_path, output_fname='test.txt'
+    )
+    evaluate_performance(
+        net, config, test_data, task_func, logger, phase='test'
+    )
     logger.dump_tabular()
