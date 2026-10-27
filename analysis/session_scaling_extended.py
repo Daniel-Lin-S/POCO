@@ -397,41 +397,79 @@ def membership_table(settings: dict) -> pd.DataFrame:
     )
 
 
-def analyze_ahrens_session_extended() -> Path:
-    """Save group and fixed-reference comparisons in one folder.
+def comparison_root(kind: str) -> Path:
+    """Create one unique folder for a named comparison artifact.
+
+    Parameters
+    ----------
+    kind : str
+        Original group or fixed-reference comparison name.
 
     Returns
     -------
     pathlib.Path
-        Absolute comparison artifact folder under the figure root.
+        New absolute artifact directory.
+    """
+    if kind not in ('original_group', 'fixed_reference'):
+        raise ValueError(f'Unknown comparison kind {kind!r}.')
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    root = (
+        Path(FIG_DIR) / 'ahrens_session_lowpass_extended' /
+        kind / stamp
+    )
+    root.mkdir(parents=True)
+    return root
+
+
+def analyze_ahrens_session_fixed_priority() -> Path:
+    """Save matched validation metrics and test comparison early.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute folder holding fixed-reference tables and PDF.
     """
     settings = load_ahrens_session_extended_campaign()
-    factory = ahrens_session_lowpass_extended
-    configs = configs_dict_unpack(factory())
-    original = summarize_groups(
-        read_group_results(settings, factory), settings
-    )
+    configs = configs_dict_unpack(ahrens_session_lowpass_extended())
     fixed_fits = read_fixed_results(
         configs, settings['reference_subjects']
     )
     fixed = summarize_fixed(fixed_fits, settings)
-    membership = membership_table(settings)
-    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-    root = Path(FIG_DIR) / 'ahrens_session_lowpass_extended' / stamp
-    root.mkdir(parents=True)
-    original.to_csv(root / 'original_summary.csv', index=False)
+    root = comparison_root('fixed_reference')
     fixed_fits.to_csv(root / 'fixed_reference_per_fit.csv', index=False)
     fixed.to_csv(root / 'fixed_reference_summary.csv', index=False)
+    plot_scaling_panels(
+        fixed, 'sessions_per_fit', 'Training sessions per fit',
+        'Ahrens low-pass 512-PC scaling: fixed subjects 8, 09, 11',
+        root / 'fixed_reference_tests.pdf',
+    )
+    print(f'Saved fixed-reference comparison: {root.resolve()}')
+    return root
+
+
+def analyze_ahrens_session_extended() -> Path:
+    """Save original group comparison after every campaign fit.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute folder holding group summary and PDF.
+    """
+    settings = load_ahrens_session_extended_campaign()
+    original = summarize_groups(
+        read_group_results(
+            settings, ahrens_session_lowpass_extended
+        ),
+        settings,
+    )
+    membership = membership_table(settings)
+    root = comparison_root('original_group')
+    original.to_csv(root / 'original_summary.csv', index=False)
     membership.to_csv(root / 'group_membership.csv', index=False)
     plot_scaling_panels(
         original, 'sessions_per_fit', 'Training sessions per fit',
         'Ahrens low-pass 512-PC scaling: group tests',
         root / 'original_group_tests.pdf',
     )
-    plot_scaling_panels(
-        fixed, 'sessions_per_fit', 'Training sessions per fit',
-        'Ahrens low-pass 512-PC scaling: fixed subjects 8, 09, 11',
-        root / 'fixed_reference_tests.pdf',
-    )
-    print(f'Saved Ahrens session comparisons: {root.resolve()}')
+    print(f'Saved original group comparison: {root.resolve()}')
     return root
