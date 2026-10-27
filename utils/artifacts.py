@@ -35,11 +35,12 @@ class FitBusyError(RuntimeError):
     """Raised when another process owns a fit lock."""
 
 
-INVOCATION_FIELDS = {
+NONSCIENTIFIC_FIELDS = {
     'cpu', 'hours', 'mem', 'num_workers', 'overwrite', 'save_path',
-    'model_name', 'experiment_name',
+    'model_name', 'experiment_name', 'save_every', 'do_analysis',
+    'tokenizer_dir', 'tokenizer_state_dict_file',
 }
-DATASET_INVOCATION_FIELDS = {'num_workers'}
+DATASET_NONSCIENTIFIC_FIELDS = {'num_workers', 'show_chance'}
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
     'flops.json', 'train_complete.txt', 'train_best_info.npy',
@@ -68,7 +69,7 @@ def file_digest(path: Path) -> str:
 
 
 def scientific_config(config: NeuralPredictionConfig) -> dict:
-    """Return parameters defining a fit, excluding invocation resources.
+    """Return fit parameters without runtime or reporting settings.
 
     Parameters
     ----------
@@ -81,10 +82,10 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
         JSON-compatible scientific parameters.
     """
     result = config.to_dict().copy()
-    for field in INVOCATION_FIELDS:
+    for field in NONSCIENTIFIC_FIELDS:
         result.pop(field, None)
     for dataset in result['dataset_config'].values():
-        for field in DATASET_INVOCATION_FIELDS:
+        for field in DATASET_NONSCIENTIFIC_FIELDS:
             dataset.pop(field, None)
     if result.get('load_path'):
         source = Path(result['load_path'])

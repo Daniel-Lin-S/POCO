@@ -18,6 +18,7 @@ from configs.config_global import (
 )
 
 SUBJECT_PATTERN = re.compile(r'^subject_([0-9]+)$')
+AHRENS_M_PROTOCOL = 'ahrens_zscore_trainval_splitfilter_float32_v1'
 
 
 def subject_number(name: str) -> int:
@@ -212,6 +213,55 @@ def processed_subject_names(filter_type: str = 'none') -> list[str]:
         validate_processed_subject(root / f'{name}.npz', filter_type)
     return subjects
 
+
+
+def preprocessing_signature(
+    filter_type: str, subjects: list[str], use_pc: bool,
+) -> dict[str, object]:
+    """Describe scientific preprocessing used by selected Ahrens data.
+
+    Parameters
+    ----------
+    filter_type : str
+        Processed filter condition.
+    subjects : list[str]
+        Subject archive stems in numeric order.
+    use_pc : bool
+        Whether model inputs use PCA activity rather than M.
+
+    Returns
+    -------
+    dict[str, object]
+        Normalization and filtering protocol, plus PCA fit settings
+        when PCA activity is used.
+    """
+    if not subjects:
+        raise ValueError('Cannot fingerprint an empty Ahrens cohort.')
+    signature: dict[str, object] = {
+        'activity_protocol': AHRENS_M_PROTOCOL,
+    }
+    if not use_pc:
+        return signature
+    expected = None
+    root = processed_directory(filter_type)
+    for subject in subjects:
+        path = root / f'{subject}.npz'
+        validate_processed_subject(path, filter_type)
+        with np.load(path) as archive:
+            actual = {
+                'pca_solver': archive['pca_solver'].item(),
+                'pca_seed': archive['pca_seed'].item(),
+                'pca_fit_dim': archive['pc_dim'].item(),
+            }
+        if expected is None:
+            expected = actual
+        elif actual != expected:
+            raise ValueError(
+                f'Ahrens PCA settings differ for {path}: '
+                f'expected {expected}, got {actual}.'
+            )
+    signature.update(expected)
+    return signature
 
 def resolve_subject_selector(
     selector: str | None, available: list[str],

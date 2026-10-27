@@ -12,6 +12,7 @@ from configs.configs import NeuralPredictionConfig, DatasetConfig
 from utils.artifacts import assign_fit_path
 from utils.ahrens_sessions import (
     processed_subject_names, resolve_subject_selector,
+    preprocessing_signature,
 )
 
 sampling_freqs = {
@@ -36,6 +37,7 @@ def configure_dataset(configs: dict, control_time_scale=False):
     """
 
     available_ahrens_subjects = {}
+    ahrens_signatures = {}
     for seed, config_list in configs.items():
         for config in config_list:
             config: NeuralPredictionConfig
@@ -173,6 +175,14 @@ def configure_dataset(configs: dict, control_time_scale=False):
                     dataset_config.session_ids = (
                         resolve_subject_selector(selector, available)
                     )
+                    key = (filter_type, dataset_config.pc_dim is not None)
+                    if key not in ahrens_signatures:
+                        ahrens_signatures[key] = (
+                            preprocessing_signature(
+                                filter_type, available, key[1]
+                            )
+                        )
+                    dataset_config.preprocessing = ahrens_signatures[key]
                 dataset_config.dataset = config.dataset[-1]
                 config.dataset_config[label] = dataset_config
 

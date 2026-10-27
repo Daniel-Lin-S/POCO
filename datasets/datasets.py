@@ -26,6 +26,7 @@ from configs.config_global import \
 from utils.data_utils import get_exp_names, get_stim_exp_names, get_mice_sessions
 from utils.ahrens_sessions import (
     processed_directory, processed_subject_names,
+    AHRENS_M_PROTOCOL,
 )
 
 def require_train_validation_fit(
@@ -478,6 +479,27 @@ class ZebrafishAhrens(Zebrafish):
         """
         with np.load(filename) as data:
             require_train_validation_fit(data, filename, config)
+            signature = getattr(config, 'preprocessing', None)
+            if not isinstance(signature, dict):
+                raise ValueError(
+                    f'Ahrens configuration lacks preprocessing '
+                    f'provenance for {filename}.'
+                )
+            if signature.get('activity_protocol') != AHRENS_M_PROTOCOL:
+                raise ValueError(
+                    f'Ahrens activity protocol does not match '
+                    f'{filename}.'
+                )
+            for key, expected in signature.items():
+                if key == 'activity_protocol':
+                    continue
+                archive_key = 'pc_dim' if key == 'pca_fit_dim' else key
+                if (archive_key not in data or
+                        data[archive_key].item() != expected):
+                    raise ValueError(
+                        f'Expected Ahrens {key}={expected!r} '
+                        f'in {filename}.'
+                    )
             expected_subject = os.path.splitext(
                 os.path.basename(filename)
             )[0]
@@ -497,6 +519,11 @@ class ZebrafishAhrens(Zebrafish):
                         'Ahrens PC data require all brain regions.'
                     )
                 activity = data['PC'][:config.pc_dim]
+                if activity.shape[0] != config.pc_dim:
+                    raise ValueError(
+                        f'Expected {config.pc_dim} Ahrens PCs in '
+                        f'{filename}, got {activity.shape[0]}.'
+                    )
                 unit_type = np.arange(activity.shape[0])
         return activity, unit_type
 
