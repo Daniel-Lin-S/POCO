@@ -41,6 +41,34 @@ NONSCIENTIFIC_FIELDS = {
     'tokenizer_dir', 'tokenizer_state_dict_file',
 }
 DATASET_NONSCIENTIFIC_FIELDS = {'num_workers', 'show_chance'}
+MODEL_ARCHITECTURE_FIELDS = {
+    'rnn_type', 'num_layers', 'teacher_forcing', 'rnn_layernorm',
+    'hidden_size', 'rnn_alpha', 'rnn_rank', 'learnable_alpha',
+    'rnn_residual_connection', 'stem_ratio', 'downsample_ratio',
+    'ffn_ratio', 'patch_size', 'patch_stride', 'num_blocks',
+    'large_size', 'small_size', 'dims', 'dw_dims',
+    'small_kernel_merged', 'call_structural_reparam',
+    'use_multi_scale', 'dropout', 'kernel_size', 'individual',
+    'freq', 'revin', 'affine', 'subtract_last', 'head_dropout',
+    'decomposition', 'tf_interval', 'latent_to_ob',
+    'tokenizer_type', 'circular_conv', 'population_token',
+    'population_token_dim', 'decoder_type', 'decoder_hidden_size',
+    'separate_projs', 'decoder_proj_init', 'normalize_input',
+    'mu_std_loss_coef', 'mu_module_mode', 'std_module_mode',
+    'mu_std_separate_projs', 'compression_factor', 'conditioning',
+    'conditioning_dim', 'conditioning_layers',
+    'freeze_conditioned_net', 'decoder_context_length',
+    'poyo_num_latents', 'latent_session_embedding',
+    'unit_embedding_components', 'poyo_query_mode',
+    'poyo_output_mode', 'decoder_num_layers', 'decoder_num_heads',
+    'poyo_unit_dropout', 'rotary_attention_tmax',
+    'poyo_embedding_only', 'mlp_hidden_size', 'mlp_hidden_layers',
+    'tsmixer_ff_dim', 'filter_embed_size', 'netformer_embed_size',
+}
+MODEL_ACTIVE_FIELDS = {
+    'NLinear': set(),
+    'TexFilter': {'filter_embed_size', 'hidden_size', 'dropout'},
+}
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
     'flops.json', 'train_complete.txt', 'train_best_info.npy',
@@ -84,6 +112,10 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
     result = config.to_dict().copy()
     for field in NONSCIENTIFIC_FIELDS:
         result.pop(field, None)
+    active_fields = MODEL_ACTIVE_FIELDS.get(result['model_type'])
+    if active_fields is not None:
+        for field in MODEL_ARCHITECTURE_FIELDS - active_fields:
+            result.pop(field, None)
     for dataset in result['dataset_config'].values():
         for field in DATASET_NONSCIENTIFIC_FIELDS:
             dataset.pop(field, None)
