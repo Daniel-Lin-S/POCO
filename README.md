@@ -31,20 +31,14 @@ To use your own data, place it in `data/...` and implement a custom data process
 
 ### Train and Analyze
 
-Create a local `.poco_local.json` in the repository root before running
-experiments:
-
-```json
-{
-  "artifact_root": "/absolute/path/to/experiment_results",
-  "ahrens_raw_dir": "/absolute/path/to/ahrens_subjects",
-  "ahrens_processed_dir": "/absolute/path/to/processed_ahrens"
-}
-```
+Place machine paths in ignored `configs/local/paths.json` and Ahrens
+preprocessing settings in ignored `configs/local/ahrens_preprocess.json`.
+The required keys are shown in `configs/templates/`.
 
 For Ahrens, preprocessing reads `subject_<id>/TimeSeries.h5` and writes
-`subject_<id>.npz`. Run one dataset and filter at a time with
-`python run_preprocess.py --dataset zebrafish_ahrens --filter none`.
+compressed `subject_<id>.npz` archives. Run the configured filter
+conditions with `python run_preprocess.py --dataset zebrafish_ahrens`.
+The lifecycle log is stored under `logs/`.
 
 Each recording uses one chronological 60/20/20 train, validation, and test
 split. Normalisation and PCA fit on train plus validation samples.

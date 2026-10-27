@@ -11,3 +11,4 @@ figures/*
 logs/
 sscript/*
 .*
+configs/local/

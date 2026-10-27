@@ -1,8 +1,9 @@
 """Launch POCO experiment fits and analyses.
 
 Input is an experiment factory name from ``configs.experiments`` and a local
-``.poco_local.json`` containing ``artifact_root``. Output is one hashed fit
-directory per scientific configuration, figures under the artifact root,
+``configs/local/paths.json`` containing ``artifact_root``. Output is
+one hashed fit directory per scientific configuration, figures under
+the artifact root,
 and launch logs under the repository's ``logs`` directory.
 """
 

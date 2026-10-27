@@ -1,0 +1,5 @@
+{
+  "artifact_root": "/absolute/path/to/experiment_results",
+  "ahrens_raw_dir": "/absolute/path/to/ahrens_subjects",
+  "ahrens_processed_dir": "/absolute/path/to/processed_ahrens"
+}

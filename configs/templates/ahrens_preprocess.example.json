@@ -1,0 +1,7 @@
+{
+  "filters": ["none", "lowpass"],
+  "pca_solver": "randomized",
+  "pc_dim": 512,
+  "pca_seed": 0,
+  "storage_dtype": "float32"
+}

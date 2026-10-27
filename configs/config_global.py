@@ -1,6 +1,6 @@
 """Define project paths and shared plot settings.
 
-Input is repository-local ``.poco_local.json`` with an absolute
+Input is ignored ``configs/local/paths.json`` with an absolute
 ``artifact_root`` value. Fit artifacts and figures are written below that
 root; Ahrens raw and processed roots can also be set locally.
 """
@@ -8,7 +8,7 @@ root; Ahrens raw and processed roots can also be set locally.
 import os
 import os.path as osp
 import logging
-import json
+from configs.local_config import load_local_json
 import torch
 
 NP_SEED = 233
@@ -16,13 +16,7 @@ TCH_SEED = 3407
 
 # Directory paths
 ROOT_DIR = osp.dirname(osp.dirname(osp.abspath(__file__)))
-LOCAL_CONFIG = osp.join(ROOT_DIR, '.poco_local.json')
-if not osp.isfile(LOCAL_CONFIG):
-    raise FileNotFoundError(
-        f'Create {LOCAL_CONFIG} with an absolute artifact_root.'
-    )
-with open(LOCAL_CONFIG, encoding='utf-8') as local_file:
-    local_paths = json.load(local_file)
+local_paths = load_local_json('paths.json')
 
 
 def local_absolute_path(key: str, fallback: str | None = None) -> str:
