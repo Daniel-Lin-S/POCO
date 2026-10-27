@@ -10,6 +10,7 @@ evaluated, and validated. Completed fits are reused unchanged.
 import argparse
 import base64
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,24 @@ from utils.campaigns.lifecycle import CampaignLog
 from utils.config_utils import config_from_dict, save_config
 
 FIT_LOCK_POLL_SECONDS = 10
+PLOTTED_CAMPAIGNS = {
+    'ahrens_length_lowpass_four', 'ahrens_session_lowpass_six',
+}
+
+
+def render_fit_figures(config: NeuralPredictionConfig) -> None:
+    """Refresh fit PDFs after scientific completion, if applicable."""
+    if config.experiment_name not in PLOTTED_CAMPAIGNS:
+        return
+    try:
+        from analysis.fit_diagnostics import render_completed_fit_figures
+
+        render_completed_fit_figures(config)
+    except Exception:
+        logging.exception(
+            'Fit completed, but figure rendering failed: %s',
+            config.save_path,
+        )
 
 
 def fit_command(
@@ -106,11 +125,13 @@ def run_fit(
             if validate_complete(config) or wait_for_old_fit(
                 config, campaign, job_id
             ):
+                render_fit_figures(config)
                 campaign.mark(job_id, 'reused')
                 return 'reused'
             if action == 'train':
                 if not save_config(config, config.save_path):
                     if validate_complete(config):
+                        render_fit_figures(config)
                         campaign.mark(job_id, 'reused')
                         return 'reused'
                     raise RuntimeError(
@@ -131,6 +152,7 @@ def run_fit(
                 raise RuntimeError(
                     f'Fit artifacts are incomplete: {config.save_path}'
                 )
+            render_fit_figures(config)
             campaign.mark(job_id, 'finished')
             return 'finished'
     except Exception as error:
