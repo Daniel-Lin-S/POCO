@@ -12,6 +12,7 @@ from configs.config_global import EXP_TYPES
 from utils.config_utils import vary_config
 from configs.configure_model_datasets import configure_models, configure_dataset
 from configs.campaigns.ahrens_length import load_ahrens_length_campaign
+from configs.campaigns.ahrens_session import load_ahrens_session_campaign
 from utils.ahrens_sessions import (
     equal_group_counts, equal_subject_group_labels,
     processed_subject_names, require_matching_subjects,
@@ -705,6 +706,37 @@ def compare_train_length_zebrafish():
     configs = configure_models(configs)
     configs = configure_dataset(configs)
     return configs
+
+def ahrens_session_lowpass_six() -> dict:
+    """Resolve equal-size full-training Ahrens session groups.
+
+    Returns
+    -------
+    dict
+        POCO and NLinear fits grouped by random seed.
+    """
+    settings = load_ahrens_session_campaign()
+    subjects = settings['subjects']
+    groups = equal_subject_group_labels(
+        subjects, 'zebrafishahrens_pc'
+    )
+    labels = [
+        label for size in settings['sessions_per_fit']
+        for label in groups[len(subjects) // size]
+    ]
+    config = NeuralPredictionConfig()
+    config.experiment_name = 'ahrens_session_lowpass_six'
+    config.max_batch = settings['max_batch']
+    config_ranges = OrderedDict()
+    config_ranges['dataset_filter'] = [settings['filter']]
+    config_ranges['dataset_label'] = labels
+    config_ranges['model_label'] = settings['models']
+    configs = vary_config(
+        config, config_ranges, mode='combinatorial',
+        num_seed=settings['seeds']
+    )
+    return configure_dataset(configure_models(configs))
+
 
 def ahrens_length_lowpass_four() -> dict:
     """Resolve separate low-pass length fits for four Ahrens subjects.

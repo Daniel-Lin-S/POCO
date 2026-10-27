@@ -1,0 +1,11 @@
+{
+  "subjects": [
+    "subject_8", "subject_09", "subject_11",
+    "subject_12", "subject_17", "subject_18"
+  ],
+  "sessions_per_fit": [1, 2, 3, 6],
+  "models": ["POCO", "NLinear"],
+  "seeds": 2,
+  "filter": "lowpass",
+  "max_batch": 10000
+}
