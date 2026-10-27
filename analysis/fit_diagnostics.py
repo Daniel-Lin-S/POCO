@@ -13,6 +13,7 @@ Scientific metrics, checkpoints, and ``complete.json`` are read only.
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 from textwrap import fill
 
@@ -33,6 +34,7 @@ from utils.campaigns.lifecycle import CampaignLog
 FIGURE_VERSION = 2
 PREDICTION_DIMS = (0, 20, 50, -1)
 EXAMPLE_COUNT = 10
+WATCH_POLL_SECONDS = 30
 FIGURE_NAMES = (
     'training_dynamics.pdf',
     *(f'{phase}_pred_vs_target/best_dim{pc}.pdf'
@@ -431,22 +433,54 @@ def render_completed_fit_figures(
     return True
 
 
-def main() -> None:
-    """Backfill complete Ahrens fits without rerunning model training."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        '--campaign', choices=sorted(CAMPAIGN_FACTORIES),
-        action='append', required=True,
-    )
-    args = parser.parse_args()
-    all_configs = [
-        config
-        for name in args.campaign
-        for seed_configs in CAMPAIGN_FACTORIES[name]().values()
-        for config in seed_configs
-    ]
+def _refresh_one(
+    config: NeuralPredictionConfig, campaign: CampaignLog,
+) -> bool:
+    """Record one figure repair or isolated failure in a lifecycle.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        Fit to refresh when scientific artifacts are complete.
+    campaign : CampaignLog
+        Figure-repair lifecycle containing this fit ID.
+
+    Returns
+    -------
+    bool
+        True when current-version figures were newly written.
+    """
+    job_id = fit_id(config)
+    try:
+        with fit_claim(
+            config, on_wait=lambda: campaign.mark(job_id, 'busy')
+        ):
+            campaign.mark(job_id, 'running')
+            changed = render_completed_fit_figures(config)
+            campaign.mark(job_id, 'finished' if changed else 'reused')
+            return changed
+    except Exception as error:
+        campaign.mark(
+            job_id, 'failed', f'{type(error).__name__}: {error}'
+        )
+        print(
+            f'Figure refresh failed for '
+            f'{Path(config.save_path).resolve()}: '
+            f'{type(error).__name__}: {error}'
+        )
+        return False
+
+
+def _run_once(configs: list[NeuralPredictionConfig]) -> None:
+    """Refresh every fit complete when this invocation begins.
+
+    Parameters
+    ----------
+    configs : list[NeuralPredictionConfig]
+        Resolved fits from selected Ahrens campaigns.
+    """
     ready = [
-        config for config in all_configs
+        config for config in configs
         if (Path(config.save_path) / 'complete.json').is_file()
     ]
     if not ready:
@@ -457,39 +491,138 @@ def main() -> None:
         'ahrens_fit_figure_repair', [fit_id(config) for config in ready]
     )
     print(f'Figure repair status: {campaign.path / "status.json"}')
-    rendered = 0
-    failures = 0
-    for config in ready:
-        job_id = fit_id(config)
-        try:
-            with fit_claim(
-                config,
-                on_wait=lambda: campaign.mark(job_id, 'busy'),
-            ):
-                campaign.mark(job_id, 'running')
-                changed = render_completed_fit_figures(config)
-                campaign.mark(
-                    job_id, 'finished' if changed else 'reused'
-                )
-                rendered += changed
-        except Exception as error:
-            failures += 1
-            campaign.mark(
-                job_id, 'failed',
-                f'{type(error).__name__}: {error}',
-            )
-            print(
-                f'Figure refresh failed for '
-                f'{Path(config.save_path).resolve()}: '
-                f'{type(error).__name__}: {error}'
-            )
+    rendered = sum(_refresh_one(config, campaign) for config in ready)
+    status = campaign.read_status()
     print(
         f'Figure backfill: refreshed={rendered}, '
-        f'not_yet_complete={len(all_configs) - len(ready)}, '
-        f'failed={failures}'
+        f'not_yet_complete={len(configs) - len(ready)}, '
+        f'failed={status["failed"]}'
     )
-    if failures:
-        raise RuntimeError(f'{failures} fit figure refreshes failed.')
+    if status['failed']:
+        raise RuntimeError(
+            f'{status["failed"]} fit figure refreshes failed.'
+        )
+
+
+def _source_jobs(
+    names: list[str], paths: list[Path],
+    configs: list[NeuralPredictionConfig],
+) -> dict[str, CampaignLog]:
+    """Validate model-campaign logs for a long-running figure watch.
+
+    Parameters
+    ----------
+    names : list[str]
+        Selected experiment names in source-path order.
+    paths : list[Path]
+        Absolute lifecycle folders for the training campaigns.
+    configs : list[NeuralPredictionConfig]
+        All resolved fits expected in the two logs.
+
+    Returns
+    -------
+    dict[str, CampaignLog]
+        Validated training lifecycle readers by experiment name.
+    """
+    if len(names) != len(paths) or len(set(names)) != len(names):
+        raise ValueError(
+            'Watch requires one distinct source status per campaign.'
+        )
+    readers = {}
+    for name, path in zip(names, paths):
+        if not path.is_absolute():
+            raise ValueError(f'Expected absolute source status: {path}.')
+        reader = CampaignLog(path)
+        status = reader.read_status()
+        expected = {
+            fit_id(config) for config in configs
+            if config.experiment_name == name
+        }
+        if (status['campaign'] != f'{name}_training' or
+                set(status['jobs']) != expected):
+            raise ValueError(
+                f'Training lifecycle does not match {name}: {path}.'
+            )
+        readers[name] = reader
+    return readers
+
+
+def _watch(
+    configs: list[NeuralPredictionConfig],
+    sources: dict[str, CampaignLog],
+) -> None:
+    """Repair newly complete fits until both source campaigns end.
+
+    Parameters
+    ----------
+    configs : list[NeuralPredictionConfig]
+        Fixed scientific fits to monitor.
+    sources : dict[str, CampaignLog]
+        Training lifecycle readers keyed by experiment name.
+    """
+    campaign = CampaignLog.create(
+        'ahrens_fit_figure_watch', [fit_id(config) for config in configs]
+    )
+    print(f'Figure watch status: {campaign.path / "status.json"}')
+    pending = list(configs)
+    while pending:
+        states = {
+            name: source.read_status()['jobs']
+            for name, source in sources.items()
+        }
+        next_pending = []
+        for config in pending:
+            job_id = fit_id(config)
+            training_state = states[config.experiment_name][job_id]
+            marker = Path(config.save_path) / 'complete.json'
+            if marker.is_file():
+                _refresh_one(config, campaign)
+            elif training_state in ('failed', 'finished', 'reused'):
+                campaign.mark(
+                    job_id, 'failed',
+                    f'Training ended as {training_state} without a '
+                    'valid completion marker.',
+                )
+            else:
+                next_pending.append(config)
+        pending = next_pending
+        if pending:
+            time.sleep(WATCH_POLL_SECONDS)
+    status = campaign.read_status()
+    print(
+        f'Figure watch ended: finished={status["finished"]}, '
+        f'failed={status["failed"]}; '
+        f'status={campaign.path / "status.json"}'
+    )
+
+
+def main() -> None:
+    """Backfill once or follow both Ahrens training campaigns."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--campaign', choices=sorted(CAMPAIGN_FACTORIES),
+        action='append', required=True,
+    )
+    parser.add_argument('--watch', action='store_true')
+    parser.add_argument('--source-status', action='append', type=Path)
+    args = parser.parse_args()
+    configs = [
+        config
+        for name in args.campaign
+        for seed_configs in CAMPAIGN_FACTORIES[name]().values()
+        for config in seed_configs
+    ]
+    if args.watch:
+        if not args.source_status:
+            parser.error('--watch requires --source-status entries.')
+        sources = _source_jobs(
+            args.campaign, args.source_status, configs
+        )
+        _watch(configs, sources)
+    else:
+        if args.source_status:
+            parser.error('--source-status requires --watch.')
+        _run_once(configs)
 
 
 if __name__ == '__main__':
