@@ -184,9 +184,37 @@ def get_idle_gpu(
                 return index
         time.sleep(10)
 
+def most_vacant_gpus(count: int) -> list[int]:
+    """Select visible CUDA devices by free memory at launch.
+
+    Parameters
+    ----------
+    count : int
+        Required number of concurrent fit slots.
+
+    Returns
+    -------
+    list[int]
+        CUDA device indices in descending free-memory order.
+    """
+    available = torch.cuda.device_count()
+    if count < 1 or available < count:
+        raise RuntimeError(
+            f'Expected {count} visible CUDA devices, got {available}.'
+        )
+    free = {
+        index: torch.cuda.mem_get_info(index)[0]
+        for index in range(available)
+    }
+    selected = sorted(free, key=free.get, reverse=True)[:count]
+    logging.info('Selected GPUs by free memory: %s', selected)
+    return selected
+
+
 def train_experiment(
     experiment: str, on_cluster: bool, on_server: bool,
     partition: str, account: str, eval: bool = False,
+    max_gpus: int | None = None, yes: bool = False,
 ) -> list[str]:
     """Launch missing fits and track one timestamped campaign.
 
@@ -204,6 +232,10 @@ def train_experiment(
         Slurm account when on_cluster is true.
     eval : bool, optional
         Finalize evaluation instead of training, default False.
+    max_gpus : int or None, optional
+        Number of most vacant visible GPUs, default all visible GPUs.
+    yes : bool, optional
+        Skip the interactive launch prompt, default False.
 
     Returns
     -------
@@ -234,7 +266,7 @@ def train_experiment(
         else:
             decisions[job_id] = 'pending'
             pending.append(config)
-    if pending and input(
+    if pending and not yes and input(
         f'Continue running {len(pending)} jobs? (y/n)'
     ) != 'y':
         return []
@@ -305,9 +337,18 @@ def train_experiment(
             for config in pending:
                 record_failure(campaign, config, error)
             raise error
-        processes = [None] * num_gpus
-        process_configs = [None] * num_gpus
-        streams = [None] * num_gpus
+        try:
+            selected_gpus = (
+                most_vacant_gpus(max_gpus)
+                if max_gpus is not None else list(range(num_gpus))
+            )
+        except RuntimeError as error:
+            for config in pending:
+                record_failure(campaign, config, error)
+            raise
+        processes = [None] * len(selected_gpus)
+        process_configs = [None] * len(selected_gpus)
+        streams = [None] * len(selected_gpus)
         for config in pending:
             gpu = get_idle_gpu(
                 processes, process_configs, streams, campaign
@@ -318,7 +359,7 @@ def train_experiment(
                 'a', encoding='utf-8'
             )
             environment = os.environ.copy()
-            environment['CUDA_VISIBLE_DEVICES'] = str(gpu)
+            environment['CUDA_VISIBLE_DEVICES'] = str(selected_gpus[gpu])
             try:
                 campaign.mark(job_id, 'running')
                 processes[gpu] = subprocess.Popen(
@@ -431,7 +472,12 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--cluster', action='store_true', help='Use batch submission on Slurm cluster')
     parser.add_argument('-s', '--server', action='store_true', help='Run experiments on a Linux server with multiple GPUs')
     parser.add_argument('-p', '--partition', default='kempner', help='Partition of resource on cluster to use')
-    parser.add_argument('--acc', default='kempner_krajan_lab', help='Account to use on cluster')
+    parser.add_argument('--acc', default='kempner_krajan_lab',
+                        help='Account to use on cluster')
+    parser.add_argument('--top-gpus', type=int, default=None,
+                        help='Use this many most vacant visible GPUs')
+    parser.add_argument('--yes', action='store_true',
+                        help='Launch pending fits without prompting')
     
     args = parser.parse_args()
     experiments2train = args.train
@@ -439,7 +485,11 @@ if __name__ == '__main__':
     experiments2eval = args.eval
     use_cluster = args.cluster
     use_server = args.server
-    assert not (use_cluster and use_server), "Either use cluster or directly run on a server"
+    assert not (use_cluster and use_server), (
+        'Either use cluster or directly run on a server'
+    )
+    if args.top_gpus is not None and not use_server:
+        parser.error('--top-gpus requires --server.')
 
     logging.basicConfig(level=LOG_LEVEL)
 
@@ -450,7 +500,8 @@ if __name__ == '__main__':
         for exp in experiments2train:
             exp_ids = train_experiment(
                 exp, on_cluster=use_cluster, on_server=use_server,
-                partition=args.partition, account=args.acc
+                partition=args.partition, account=args.acc,
+                max_gpus=args.top_gpus, yes=args.yes
             )
             train_ids += exp_ids
 
