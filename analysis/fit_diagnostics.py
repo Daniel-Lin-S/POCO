@@ -28,6 +28,7 @@ from configs.experiments import (
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
+from utils.campaigns.lifecycle import CampaignLog
 
 FIGURE_VERSION = 1
 PREDICTION_DIMS = (0, 20, 50, -1)
@@ -351,29 +352,54 @@ def main() -> None:
         action='append', required=True,
     )
     args = parser.parse_args()
+    all_configs = [
+        config
+        for name in args.campaign
+        for seed_configs in CAMPAIGN_FACTORIES[name]().values()
+        for config in seed_configs
+    ]
+    ready = [
+        config for config in all_configs
+        if (Path(config.save_path) / 'complete.json').is_file()
+    ]
+    if not ready:
+        raise ValueError(
+            'No completed Ahrens fits are ready for figure repair.'
+        )
+    campaign = CampaignLog.create(
+        'ahrens_fit_figure_repair', [fit_id(config) for config in ready]
+    )
+    print(f'Figure repair status: {campaign.path / "status.json"}')
     rendered = 0
-    skipped = 0
     failures = 0
-    for name in args.campaign:
-        configs = CAMPAIGN_FACTORIES[name]()
-        for seed_configs in configs.values():
-            for config in seed_configs:
-                if not (Path(config.save_path) / 'complete.json').is_file():
-                    skipped += 1
-                    continue
-                try:
-                    with fit_claim(config):
-                        rendered += render_completed_fit_figures(config)
-                except Exception as error:
-                    failures += 1
-                    print(
-                        f'Figure refresh failed for '
-                        f'{Path(config.save_path).resolve()}: '
-                        f'{type(error).__name__}: {error}'
-                    )
+    for config in ready:
+        job_id = fit_id(config)
+        try:
+            with fit_claim(
+                config,
+                on_wait=lambda: campaign.mark(job_id, 'busy'),
+            ):
+                campaign.mark(job_id, 'running')
+                changed = render_completed_fit_figures(config)
+                campaign.mark(
+                    job_id, 'finished' if changed else 'reused'
+                )
+                rendered += changed
+        except Exception as error:
+            failures += 1
+            campaign.mark(
+                job_id, 'failed',
+                f'{type(error).__name__}: {error}',
+            )
+            print(
+                f'Figure refresh failed for '
+                f'{Path(config.save_path).resolve()}: '
+                f'{type(error).__name__}: {error}'
+            )
     print(
         f'Figure backfill: refreshed={rendered}, '
-        f'not_ready_or_current={skipped}, failed={failures}'
+        f'not_yet_complete={len(all_configs) - len(ready)}, '
+        f'failed={failures}'
     )
     if failures:
         raise RuntimeError(f'{failures} fit figure refreshes failed.')
