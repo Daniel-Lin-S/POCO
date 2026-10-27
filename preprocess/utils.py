@@ -93,6 +93,9 @@ def run_pca(
     exp_name: str = '',
     n_components: int = 2048,
     fig_dir: str = 'preprocess',
+    plot_diagnostics: bool = True,
+    solver: str = 'full',
+    random_state: int | None = None,
 ) -> np.ndarray:
     """Fit PCA on train and validation samples and transform all samples.
 
@@ -108,6 +111,12 @@ def run_pca(
         Requested principal components, default 2048.
     fig_dir : str, optional
         Directory for the variance plot, default 'preprocess'.
+    plot_diagnostics : bool, optional
+        Save the variance plot, default True.
+    solver : str, optional
+        PCA solver, default full.
+    random_state : int or None, optional
+        Seed for a randomized solver, default None.
 
     Returns
     -------
@@ -125,27 +134,27 @@ def run_pca(
     n_components = min(n_components, fit_data.shape[1], data.shape[0])
     if n_components < 1:
         raise ValueError("PCA requires at least one fit sample and neuron.")
-    pca = PCA(n_components=n_components, svd_solver='full')
+    pca = PCA(
+        n_components=n_components, svd_solver=solver,
+        random_state=random_state,
+    )
     pca.fit(fit_data.T)
     act = pca.transform(data.T)
     if not np.isfinite(act).all():
         raise ValueError("PCA transformed activity contains non-finite values.")
-    print('EV 10:', pca.explained_variance_ratio_[:10])
-    cumulated = np.cumsum(pca.explained_variance_ratio_)
-    plots.error_plot(
-        np.arange(1, len(cumulated) + 1),
-        [cumulated],
-        x_label='Number of PCs', y_label='Explained variance',
-        save_dir=fig_dir,
-        fig_name=f'{exp_name}_explained_variance',
-        errormode='none',
-        mode='errorshade',
-        yticks=[0, 1]
-    )
-
-    print("Reduced Data Shape: ", act.shape)
-    print(f"Cumulative Explained Variance for {n_components} PCs", cumulated[-1])
-    print('')
+    if plot_diagnostics:
+        print('EV 10:', pca.explained_variance_ratio_[:10])
+        cumulated = np.cumsum(pca.explained_variance_ratio_)
+        plots.error_plot(
+            np.arange(1, len(cumulated) + 1),
+            [cumulated],
+            x_label='Number of PCs', y_label='Explained variance',
+            save_dir=fig_dir,
+            fig_name=f'{exp_name}_explained_variance',
+            errormode='none',
+            mode='errorshade',
+            yticks=[0, 1]
+        )
     return act.T
 
 def get_clustered_data(
@@ -207,32 +216,60 @@ def plot_delta_F(data, exp_name='', fig_dir='preprocess', suffix=''):
     )
 
 def process_data_matrix(
-    data, fig_dir, 
-    roi_indices=None, 
-    divide_baseline=False, 
-    normalize_mode='zscore', 
-    n_clusers=[], 
-    plot_max_min=False, 
-    exp_name='',
-    pc_dim=2048,
-    plot_window=64,
-    filter_mode='none'
-):
-    """
-    Process the data matrix, also plot the distribution of min F and max F, and sample traces of first 10 PCs / 10 random neurons
+    data: np.ndarray,
+    fig_dir: str,
+    roi_indices: np.ndarray | None = None,
+    divide_baseline: bool = False,
+    normalize_mode: str = 'zscore',
+    n_clusers: list[int] | None = None,
+    plot_max_min: bool = False,
+    exp_name: str = '',
+    pc_dim: int = 2048,
+    plot_window: int = 64,
+    filter_mode: str = 'none',
+    plot_diagnostics: bool = True,
+    pca_solver: str = 'full',
+    pca_random_state: int | None = None,
+) -> dict[str, np.ndarray | str | float | bool]:
+    """Normalize a recording and optionally fit PCA on train and validation.
 
-    :param data: n_neurons * T
-    :param roi_indices: n_neurons or None, represent the valid ROIs to use
-    :param divide_baseline: whether to calculate delta F / F
-    :param normalize_mode: 'none', 'zscore', 'max'
-    :param n_clusters: list of number of clusters to use
-    :param plot_max_min: whether to plot the distribution of min F and max F
-    :param exp_name: experiment name
-    :param pc_dim: number of PCs to use
-    :param plot_window: window size to plot
-    :param filter_mode: 'none', 'lowpass', 'highpass', 'bandpass'
+    Parameters
+    ----------
+    data : np.ndarray
+        Neural activity with shape ``(neurons, time)``.
+    fig_dir : str
+        Figure subdirectory under the configured artifact root.
+    roi_indices : np.ndarray or None, optional
+        Boolean neuron mask with shape ``(neurons,)``, default None.
+    divide_baseline : bool, optional
+        Subtract and divide by the train/validation median, default False.
+    normalize_mode : str, optional
+        ``zscore``, ``max``, or ``none``, default ``zscore``.
+    n_clusers : list[int] or None, optional
+        Cluster counts for FC arrays, default None.
+    plot_max_min : bool, optional
+        Save min/max diagnostics, default False.
+    exp_name : str, optional
+        Recording label for diagnostic figures, default empty.
+    pc_dim : int, optional
+        Requested PCA component count, default 2048; zero skips PCA.
+    plot_window : int, optional
+        Diagnostic trace window in samples, default 64.
+    filter_mode : str, optional
+        Split-local filter mode, default ``none``.
+    plot_diagnostics : bool, optional
+        Save diagnostic figures, default True.
+    pca_solver : str, optional
+        Scikit-learn PCA solver, default ``full``.
+    pca_random_state : int or None, optional
+        PCA random seed, default None.
 
-    return: dict with keys 'valid_indices', 'M', 'PC', 'FC_{n}', where n is in n_clusters
+    Returns
+    -------
+    dict[str, np.ndarray | str | float | bool]
+        ``M`` has shape ``(neurons, time)``; ``PC`` has shape
+        ``(components, time)`` when requested. ``valid_indices`` has
+        shape ``(neurons,)``. Split-fit metadata are scalar values.
     """
     data_dict = {}
     n, T = data.shape
@@ -308,49 +345,61 @@ def process_data_matrix(
     if pc_dim == 0:
         return data_dict
     
-    normalized = normalized[roi_indices]
+    if not roi_indices.all():
+        normalized = normalized[roi_indices]
     if normalized.shape[0] == 0:
         raise ValueError("No valid neurons remain for PCA.")
-    plot_delta_F(normalized, fig_dir=sub_fig_dir, exp_name=exp_name)
+    if plot_diagnostics:
+        plot_delta_F(normalized, fig_dir=sub_fig_dir, exp_name=exp_name)
     data_dict['PC'] = run_pca(
         normalized, fit_mask, fig_dir=sub_fig_dir,
         exp_name=exp_name, n_components=pc_dim,
+        plot_diagnostics=plot_diagnostics,
+        solver=pca_solver, random_state=pca_random_state,
     )
-    plot_delta_F(data_dict['PC'], fig_dir=sub_fig_dir, suffix='_PC', exp_name=exp_name)
+    if plot_diagnostics:
+        plot_delta_F(
+            data_dict['PC'], fig_dir=sub_fig_dir,
+            suffix='_PC', exp_name=exp_name,
+        )
 
-    # plot first 10 PCs
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(7, 10))
-    for i in range(10):
-        ax = plt.subplot(10, 2, i * 2 + 1)
-        ax.plot(data_dict['PC'][i])
-        ax.title.set_text(f'PC {i}, full trace')
-        # plot a random plot_window-step window
-        ax = plt.subplot(10, 2, i * 2 + 2)
-        t = np.random.randint(0, data_dict['PC'].shape[1] - plot_window)
-        ax.plot(data_dict['PC'][i, t: t + plot_window])
-        ax.title.set_text(f'PC {i}, {plot_window}-step window')
-    plt.tight_layout()
-    plt.savefig(os.path.join(sub_fig_dir, f'{exp_name}_first_10_PCs.pdf'))
-    plt.close()
+        # plot first 10 PCs
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(7, 10))
+        for i in range(10):
+            ax = plt.subplot(10, 2, i * 2 + 1)
+            ax.plot(data_dict['PC'][i])
+            ax.title.set_text(f'PC {i}, full trace')
+            # plot a random plot_window-step window
+            ax = plt.subplot(10, 2, i * 2 + 2)
+            t = np.random.randint(0, data_dict['PC'].shape[1] - plot_window)
+            ax.plot(data_dict['PC'][i, t: t + plot_window])
+            ax.title.set_text(f'PC {i}, {plot_window}-step window')
+        plt.tight_layout()
+        plt.savefig(os.path.join(sub_fig_dir, f'{exp_name}_first_10_PCs.pdf'))
+        plt.close()
 
-    # plot 10 random neurons
-    plt.figure(figsize=(7, 10))
-    for i in range(10):
-        idx = np.random.randint(0, normalized.shape[0])
-        ax = plt.subplot(10, 2, i * 2 + 1)
-        ax.plot(normalized[idx])
-        ax.title.set_text(f'Neuron {idx}, full trace')
-        # plot a random plot_window-step window
-        ax = plt.subplot(10, 2, i * 2 + 2)
-        t = np.random.randint(0, normalized.shape[1] - plot_window)
-        ax.plot(normalized[idx, t: t + plot_window])
-        ax.title.set_text(f'Neuron {idx}, {plot_window}-step window')
-    plt.tight_layout()
-    plt.savefig(os.path.join(sub_fig_dir, f'{exp_name}_10_random_neurons.pdf'))
-    plt.close()
+        # plot 10 random neurons
+        plt.figure(figsize=(7, 10))
+        for i in range(10):
+            idx = np.random.randint(0, normalized.shape[0])
+            ax = plt.subplot(10, 2, i * 2 + 1)
+            ax.plot(normalized[idx])
+            ax.title.set_text(f'Neuron {idx}, full trace')
+            # plot a random plot_window-step window
+            ax = plt.subplot(10, 2, i * 2 + 2)
+            t = np.random.randint(0, normalized.shape[1] - plot_window)
+            ax.plot(normalized[idx, t: t + plot_window])
+            ax.title.set_text(f'Neuron {idx}, {plot_window}-step window')
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(
+                sub_fig_dir, f'{exp_name}_10_random_neurons.pdf'
+            )
+        )
+        plt.close()
 
-    for n_cluster in n_clusers:
+    for n_cluster in n_clusers or ():
         data_dict[f'FC_{n_cluster}'] = get_clustered_data(
             normalized, fit_mask, n_cluster
         )

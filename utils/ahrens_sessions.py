@@ -2,7 +2,8 @@
 
 Raw input contains ``subject_<integer>/TimeSeries.h5`` directories.
 Processed input contains ``subject_<integer>.npz`` archives with ``M``,
-``PC``, and split-fit metadata. Outputs are subject names sorted by numeric
+``PC``, split-fit metadata, and PCA settings. Outputs are subject names
+sorted by numeric
 identifier, retaining zero padding from the source directory name.
 """
 
@@ -108,6 +109,8 @@ def processed_directory(filter_type: str = 'none') -> Path:
 
 def validate_processed_subject(
     path: Path, filter_type: str,
+    pc_dim: int | None = None, pca_solver: str | None = None,
+    pca_seed: int | None = None,
 ) -> None:
     """Check the identity and split metadata of one complete archive.
 
@@ -117,6 +120,12 @@ def validate_processed_subject(
         Subject-named NPZ archive to inspect.
     filter_type : str
         Expected filter condition for this archive.
+    pc_dim : int or None, optional
+        Expected saved component count, default None.
+    pca_solver : str or None, optional
+        Expected PCA solver, default None.
+    pca_seed : int or None, optional
+        Expected PCA seed, default None.
 
     Raises
     ------
@@ -126,7 +135,7 @@ def validate_processed_subject(
     required = {
         'M', 'PC', 'valid_indices', 'source_subject', 'filter_mode',
         'fit_split', 'fit_train_split', 'fit_val_split',
-        'fit_filter_isolated',
+        'fit_filter_isolated', 'pc_dim', 'pca_solver', 'pca_seed',
     }
     try:
         with np.load(path) as archive:
@@ -137,6 +146,9 @@ def validate_processed_subject(
             actual_filter = archive['filter_mode'].item()
             split = archive['fit_split'].item()
             isolated = archive['fit_filter_isolated'].item()
+            saved_pc_dim = archive['pc_dim'].item()
+            saved_solver = archive['pca_solver'].item()
+            saved_seed = archive['pca_seed'].item()
             if actual != path.stem or actual_filter != filter_type:
                 raise ValueError(
                     f'Expected subject {path.stem} with filter '
@@ -147,6 +159,27 @@ def validate_processed_subject(
                     'Expected chronological train/validation fit with '
                     'split-local filtering.'
                 )
+            if not isinstance(saved_pc_dim, int) or saved_pc_dim < 1:
+                raise ValueError(
+                    f'Expected positive pc_dim, got {saved_pc_dim!r}.'
+                )
+            if saved_solver not in ('full', 'randomized'):
+                raise ValueError(
+                    f'Unexpected PCA solver {saved_solver!r}.'
+                )
+            if not isinstance(saved_seed, int):
+                raise ValueError(
+                    f'Expected integer pca_seed, got {saved_seed!r}.'
+                )
+            expected = (pc_dim, pca_solver, pca_seed)
+            actual = (saved_pc_dim, saved_solver, saved_seed)
+            for wanted, observed, key in zip(
+                expected, actual, ('pc_dim', 'pca_solver', 'pca_seed')
+            ):
+                if wanted is not None and wanted != observed:
+                    raise ValueError(
+                        f'Expected {key}={wanted!r}, got {observed!r}.'
+                    )
     except (OSError, ValueError, KeyError, BadZipFile, EOFError) as error:
         raise ValueError(
             f'Invalid processed Ahrens subject archive {path}: {error}'
