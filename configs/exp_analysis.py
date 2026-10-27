@@ -693,6 +693,15 @@ def ahrens_length_lowpass_four_analysis() -> None:
     analyze_ahrens_length()
 
 
+def ahrens_session_lowpass_extended_analysis() -> None:
+    """Save original and fixed-reference Ahrens comparisons."""
+    from analysis.session_scaling_extended import (
+        analyze_ahrens_session_extended,
+    )
+
+    analyze_ahrens_session_extended()
+
+
 def ahrens_session_lowpass_six_analysis() -> None:
     """Save the six-subject session-scaling summary."""
     from analysis.session_scaling import analyze_ahrens_sessions

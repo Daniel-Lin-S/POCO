@@ -13,6 +13,7 @@ metrics and checkpoints remain in their own immutable directories.
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -26,17 +27,43 @@ from utils.artifacts import validate_complete
 METRICS = ('test_score', 'test_loss')
 
 
-def read_group_results() -> pd.DataFrame:
-    """Read finite test and training-compute metrics from all pilot fits.
+def campaign_sizes(settings: dict) -> list[int]:
+    """Return ordered session counts for pilot or extended settings."""
+    if 'groups' in settings:
+        return [int(size) for size in settings['groups']]
+    return settings['sessions_per_fit']
+
+
+def group_count(settings: dict, size: int) -> int:
+    """Return the number of groups configured at one session count."""
+    if 'groups' in settings:
+        return len(settings['groups'][str(size)])
+    return len(settings['subjects']) // size
+
+
+def read_group_results(
+    settings: dict | None = None,
+    factory: Callable[[], dict] | None = None,
+) -> pd.DataFrame:
+    """Read finite test and training-compute metrics from complete fits.
+
+    Parameters
+    ----------
+    settings : dict or None, optional
+        Campaign settings, default six-subject pilot settings.
+    factory : Callable or None, optional
+        Resolved fit factory, default six-subject pilot factory.
 
     Returns
     -------
     pandas.DataFrame
         One row per completed fit, keyed by seed, model, and group.
     """
-    settings = load_ahrens_session_campaign()
+    settings = (load_ahrens_session_campaign()
+                if settings is None else settings)
+    factory = ahrens_session_lowpass_six if factory is None else factory
     records = []
-    for seed, configs in ahrens_session_lowpass_six().items():
+    for seed, configs in factory().items():
         for config in configs:
             if not validate_complete(config):
                 raise ValueError(f'Incomplete session fit: {config.save_path}')
@@ -80,8 +107,8 @@ def read_group_results() -> pd.DataFrame:
                 raise ValueError(f'Non-finite metrics in {root}.')
             records.append(record)
     expected = (
-        sum(len(settings['subjects']) // size for size in
-            settings['sessions_per_fit']) *
+        sum(group_count(settings, size) for size in
+            campaign_sizes(settings)) *
         len(settings['models']) * settings['seeds']
     )
     if len(records) != expected:
@@ -91,7 +118,9 @@ def read_group_results() -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-def summarize_groups(results: pd.DataFrame) -> pd.DataFrame:
+def summarize_groups(
+    results: pd.DataFrame, settings: dict | None = None,
+) -> pd.DataFrame:
     """Average equal-size groups within each seed, then seeds.
 
     Parameters
@@ -99,12 +128,16 @@ def summarize_groups(results: pd.DataFrame) -> pd.DataFrame:
     results : pandas.DataFrame
         Complete per-fit metrics from ``read_group_results``.
 
+    settings : dict or None, optional
+        Campaign settings, default six-subject pilot settings.
+
     Returns
     -------
     pandas.DataFrame
         One row per model and sessions-per-fit count.
     """
-    settings = load_ahrens_session_campaign()
+    settings = (load_ahrens_session_campaign()
+                if settings is None else settings)
     keys = ['seed', 'model', 'sessions_per_fit']
     by_seed = results.groupby(keys).agg(
         test_score=('test_score', 'mean'),
@@ -121,9 +154,9 @@ def summarize_groups(results: pd.DataFrame) -> pd.DataFrame:
         ),
         group_count=('group', 'size'),
     ).reset_index()
-    for size in settings['sessions_per_fit']:
+    for size in campaign_sizes(settings):
         rows = by_seed.loc[by_seed['sessions_per_fit'] == size]
-        expected_groups = len(settings['subjects']) // size
+        expected_groups = group_count(settings, size)
         if len(rows) != settings['seeds'] * len(settings['models']):
             raise ValueError(f'Missing seed/model rows for size {size}.')
         if not (rows['group_count'] == expected_groups).all():
@@ -142,7 +175,7 @@ def summarize_groups(results: pd.DataFrame) -> pd.DataFrame:
         summary = {
             'model': model,
             'sessions_per_fit': size,
-            'group_count': len(settings['subjects']) // size,
+            'group_count': group_count(settings, size),
             'seed_count': len(rows),
         }
         for metric in METRICS:
