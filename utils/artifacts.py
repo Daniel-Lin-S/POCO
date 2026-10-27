@@ -69,6 +69,26 @@ MODEL_ACTIVE_FIELDS = {
     'NLinear': set(),
     'TexFilter': {'filter_embed_size', 'hidden_size', 'dropout'},
 }
+DECODER_COMMON_FIELDS = {
+    'decoder_type', 'decoder_context_length', 'compression_factor',
+    'separate_projs', 'conditioning', 'normalize_input',
+    'mu_std_loss_coef', 'mu_module_mode', 'std_module_mode',
+    'mu_std_separate_projs', 'freeze_conditioned_net',
+}
+DECODER_TYPE_FIELDS = {
+    'Linear': set(),
+    'MLP': {'decoder_hidden_size', 'mlp_hidden_layers'},
+    'Transformer': {
+        'decoder_hidden_size', 'decoder_num_heads', 'decoder_num_layers',
+    },
+    'POYO': {
+        'decoder_hidden_size', 'decoder_num_heads', 'decoder_num_layers',
+        'poyo_num_latents', 'poyo_query_mode', 'poyo_output_mode',
+        'poyo_unit_dropout', 'rotary_attention_tmax',
+        'unit_embedding_components', 'latent_session_embedding',
+        'poyo_embedding_only',
+    },
+}
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
     'flops.json', 'train_complete.txt', 'train_best_info.npy',
@@ -96,6 +116,22 @@ def file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def active_model_fields(config: dict) -> set[str] | None:
+    """Return used architecture fields for supported model families."""
+    model_type = config['model_type']
+    if model_type != 'Decoder':
+        return MODEL_ACTIVE_FIELDS.get(model_type)
+    decoder_type = config['decoder_type']
+    if decoder_type not in DECODER_TYPE_FIELDS:
+        return None
+    fields = DECODER_COMMON_FIELDS | DECODER_TYPE_FIELDS[decoder_type]
+    if config['conditioning'] == 'mlp':
+        fields |= {'conditioning_dim', 'conditioning_layers'}
+    elif config['separate_projs']:
+        fields |= {'decoder_proj_init'}
+    return fields
+
+
 def scientific_config(config: NeuralPredictionConfig) -> dict:
     """Return fit parameters without runtime or reporting settings.
 
@@ -112,7 +148,7 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
     result = config.to_dict().copy()
     for field in NONSCIENTIFIC_FIELDS:
         result.pop(field, None)
-    active_fields = MODEL_ACTIVE_FIELDS.get(result['model_type'])
+    active_fields = active_model_fields(result)
     if active_fields is not None:
         for field in MODEL_ARCHITECTURE_FIELDS - active_fields:
             result.pop(field, None)
