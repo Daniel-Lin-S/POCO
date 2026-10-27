@@ -153,10 +153,54 @@ def launch_priority() -> int:
             temporary_path.unlink(missing_ok=True)
 
 
+def guard_resume(
+    original_pid: int, original_start: str,
+    priority_pid: int,
+) -> None:
+    """Release a paused queue if its priority launcher has exited.
+
+    Parameters
+    ----------
+    original_pid : int
+        Paused original queue coordinator PID.
+    original_start : str
+        Verified kernel start tick for that coordinator.
+    priority_pid : int
+        Live priority launcher PID to monitor independently.
+    """
+    arguments = (
+        (Path('/proc') / str(priority_pid) / 'cmdline')
+        .read_bytes().decode().split('\0')
+    )
+    if ('main.py' not in arguments or
+            PRIORITY_EXPERIMENT not in arguments):
+        raise ValueError(
+            f'PID {priority_pid} is not the priority launcher.'
+        )
+    priority_start = process_start(priority_pid)
+    while original_alive(priority_pid, priority_start):
+        time.sleep(POLL_SECONDS)
+    if not original_alive(original_pid, original_start):
+        raise RuntimeError(
+            f'Original launcher PID {original_pid} disappeared.'
+        )
+    time.sleep(WORKER_RELEASE_SECONDS)
+    state = (
+        (Path('/proc') / str(original_pid) / 'stat')
+        .read_text().rsplit(')', 1)[1].split()[0]
+    )
+    if state in ('T', 't'):
+        os.kill(original_pid, signal.SIGCONT)
+        print('Resume guard released original queue.', flush=True)
+    else:
+        print('Original queue already resumed.', flush=True)
+
+
 def main() -> None:
     """Run the verified handoff, resuming original queue on exit."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--original-pid', type=int, required=True)
+    parser.add_argument('--guard-priority-pid', type=int)
     parser.add_argument(
         '--original-status', type=Path, required=True
     )
@@ -167,6 +211,12 @@ def main() -> None:
             f'Expected absolute status path, got '
             f'{args.original_status}.'
         )
+    if args.guard_priority_pid is not None:
+        guard_resume(
+            args.original_pid, start,
+            args.guard_priority_pid,
+        )
+        return
     try:
         wait_for_workers(
             args.original_status, args.original_pid, start
