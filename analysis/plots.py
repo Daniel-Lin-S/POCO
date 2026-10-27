@@ -2,6 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
+from pathlib import Path
+from textwrap import fill
+
+import seaborn as sns
 
 from configs.config_global import FIG_DIR, MODEL_COLORS
 from collections.abc import Iterable
@@ -521,39 +525,108 @@ def distribution_plot(
     )
 
 def pred_vs_target_plot(
-    data, 
-    save_dir, 
-    fig_name,
-    vertical_line_pos=None,
-    fontsize=8,
-    legend=True
-):
+    data: list[tuple[np.ndarray, np.ndarray]],
+    save_dir: str,
+    fig_name: str,
+    vertical_line_pos: int | None = None,
+    fontsize: int = 9,
+    legend: bool = True,
+    title: str | None = None,
+    prediction_color: str = '#E67E22',
+    row_labels: list[str] | None = None,
+) -> None:
+    """Save prediction and target traces for one fitted condition.
+
+    Parameters
+    ----------
+    data : list[tuple[np.ndarray, np.ndarray]]
+        Prediction and target pairs, each with shape ``(time,)``.
+    save_dir : str
+        Absolute fit-local output directory.
+    fig_name : str
+        PDF stem within ``save_dir``.
+    vertical_line_pos : int or None, optional
+        First predicted frame, default None.
+    fontsize : int, optional
+        Text size, default 9.
+    legend : bool, optional
+        Show an external figure legend, default True.
+    title : str or None, optional
+        Brief model and fit-condition title, default None.
+    prediction_color : str, optional
+        Prediction line color, default POCO orange.
+    row_labels : list[str] or None, optional
+        Recording and saved-window label for each row, default numbered
+        examples.
     """
-    data: a list of tuples (pred, target), both are 1D numpy arrays of the same length; each tuple is a trial and would be plotted as in a seperate subplot
-    """
-
-    fig_size = (4, len(data) * 0.8 + 0.5)
-    fig, axes = plt.subplots(len(data), 1, figsize=fig_size)
-
-    ylim = max([max(np.max(np.abs(target)), np.max(np.abs(pred))) for pred, target in data])
-    ylim = max(ylim, 1)
-
-    for i, (prediction, target) in enumerate(data):
-        ax = axes[i]
-        ax.plot(target, label='target', color='gray')
-        ax.plot(prediction, label='prediction', color='orange')
-        # ax.set_ylim(-ylim, ylim)
-
-        if i == 0 and legend:
-            ax.legend(fontsize=fontsize)
-        
-        if i != len(data) - 1:
-            ax.set_xticks([])
-
+    if not data:
+        raise ValueError('Prediction figure requires at least one trace.')
+    if row_labels is not None and len(row_labels) != len(data):
+        raise ValueError(
+            f'Expected {len(data)} row labels, got {len(row_labels)}.'
+        )
+    for index, (prediction, target) in enumerate(data):
+        if (prediction.ndim != 1 or target.ndim != 1 or
+                prediction.shape != target.shape or
+                prediction.size == 0):
+            raise ValueError(
+                f'Example {index} needs equal nonempty 1D traces; '
+                f'got {prediction.shape} and {target.shape}.'
+            )
+        if not np.isfinite(prediction).all() or not np.isfinite(target).all():
+            raise ValueError(f'Example {index} contains non-finite values.')
+    output_dir = Path(save_dir)
+    if not output_dir.is_absolute():
+        output_dir = Path(FIG_DIR) / output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f'{fig_name}.pdf'
+    sns.set_theme(style='ticks', context='paper')
+    fig, axes = plt.subplots(
+        len(data), 1, figsize=(7.2, len(data) * 1.35 + 2.0),
+        sharex=True, squeeze=False,
+    )
+    for index, (prediction, target) in enumerate(data):
+        ax = axes[index, 0]
+        ax.plot(target, label='Target', color='#3C4147', linewidth=1.6)
+        ax.plot(
+            prediction, label='Prediction', color=prediction_color,
+            linewidth=1.6, linestyle='--',
+        )
         if vertical_line_pos is not None:
-            ax.axvline(vertical_line_pos, color='black', linestyle='--')
-
-    save_dir = os.path.join(FIG_DIR, save_dir)
-    os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, f'{fig_name}.pdf'))
-    plt.close()
+            ax.axvline(
+                vertical_line_pos - 0.5, color='#6B7280',
+                linestyle=':', linewidth=1.1,
+                label='Prediction begins',
+            )
+        label = (row_labels[index] if row_labels is not None
+                 else f'Example {index + 1}')
+        ax.set_title(label, loc='left', fontsize=fontsize - 1, pad=2)
+        sns.despine(ax=ax)
+    axes[-1, 0].set_xlabel('Time (frames)', fontsize=fontsize)
+    fig.supylabel('Neural activity', fontsize=fontsize)
+    lines = 0
+    if title:
+        wrapped = fill(title, width=62)
+        lines = wrapped.count('\n') + 1
+        fig.suptitle(wrapped, y=0.995, fontsize=fontsize + 2)
+    fig.text(
+        0.5, 0.057,
+        'Rows are saved windows; slot numbers are within saved batches.',
+        ha='center', fontsize=fontsize - 1,
+    )
+    if legend:
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(
+            handles, labels, loc='lower center',
+            bbox_to_anchor=(0.5, 0.01), ncol=len(labels),
+            frameon=False, fontsize=fontsize,
+        )
+    top = 0.95 - 0.025 * max(0, lines - 1)
+    fig.tight_layout(rect=(0.03, 0.09, 1, top), h_pad=0.3)
+    pending = output.with_name(f'.{output.name}.{os.getpid()}.pending')
+    try:
+        fig.savefig(pending, format='pdf')
+        os.replace(pending, output)
+    finally:
+        plt.close(fig)
+        pending.unlink(missing_ok=True)

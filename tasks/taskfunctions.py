@@ -10,7 +10,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import os
+from pathlib import Path
 import analysis.plots as plots
+from analysis.fit_diagnostics import (
+    fit_title, pc_label, sample_row_label,
+)
 import itertools
 
 from configs.config_global import DEVICE
@@ -175,6 +179,7 @@ class NeuralPrediction(TaskFunction):
 
             preds = []
             targets = []
+            row_labels = []
 
             for iter in range(10):
                 batch_idx = np.random.randint(len(self.sample_trials[phase]))
@@ -190,13 +195,30 @@ class NeuralPrediction(TaskFunction):
                     target = np.concatenate([inp, target])
                 preds.append(pred)
                 targets.append(target)
+                row_labels.append(sample_row_label(
+                    self.config, batch_idx, sample_idx,
+                    len(self.sample_trials[phase]),
+                ))
 
             plots.pred_vs_target_plot(
-                list(zip(preds, targets)), 
-                os.path.join(save_path, f'{phase}_pred_vs_target'), 
+                list(zip(preds, targets)),
+                os.path.join(save_path, f'{phase}_pred_vs_target'),
                 f'best_dim{pc}',
-                len(preds[0]) - self.pred_step
+                len(preds[0]) - self.pred_step,
+                title=(
+                    f'{fit_title(self.config)} | '
+                    f'{phase.title()} predictions | '
+                    f'{pc_label(self.config, pc)}'
+                ),
+                prediction_color=plots.get_model_colors(
+                    [self.config.model_label]
+                )[0],
+                row_labels=row_labels,
             )
+        print(
+            'Saved prediction figures: '
+            f'{(Path(save_path) / f"{phase}_pred_vs_target").resolve()}'
+        )
         
     def after_testing_callback(self, logger: Logger, save_path: str,
                                is_best: bool, batch_num: int,
