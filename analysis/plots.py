@@ -529,7 +529,7 @@ def pred_vs_target_plot(
     save_dir: str,
     fig_name: str,
     vertical_line_pos: int | None = None,
-    fontsize: int = 9,
+    fontsize: int = 13,
     legend: bool = True,
     title: str | None = None,
     prediction_color: str = '#E67E22',
@@ -548,7 +548,7 @@ def pred_vs_target_plot(
     vertical_line_pos : int or None, optional
         First predicted frame, default None.
     fontsize : int, optional
-        Text size, default 9.
+        Text size, default 13.
     legend : bool, optional
         Show an external figure legend, default True.
     title : str or None, optional
@@ -580,9 +580,9 @@ def pred_vs_target_plot(
         output_dir = Path(FIG_DIR) / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f'{fig_name}.pdf'
-    sns.set_theme(style='ticks', context='paper')
+    sns.set_theme(style='ticks', context='talk', font_scale=0.9)
     fig, axes = plt.subplots(
-        len(data), 1, figsize=(7.2, len(data) * 1.35 + 2.0),
+        len(data), 1, figsize=(10.0, len(data) * 1.7 + 2.5),
         sharex=True, squeeze=False,
     )
     for index, (prediction, target) in enumerate(data):
@@ -600,19 +600,20 @@ def pred_vs_target_plot(
             )
         label = (row_labels[index] if row_labels is not None
                  else f'Example {index + 1}')
-        ax.set_title(label, loc='left', fontsize=fontsize - 1, pad=2)
+        ax.set_title(label, loc='left', fontsize=fontsize - 1, pad=4)
+        ax.tick_params(axis='both', labelsize=fontsize - 2)
         sns.despine(ax=ax)
     axes[-1, 0].set_xlabel('Time (frames)', fontsize=fontsize)
     fig.supylabel('Neural activity', fontsize=fontsize)
     lines = 0
     if title:
-        wrapped = fill(title, width=62)
+        wrapped = fill(title, width=70)
         lines = wrapped.count('\n') + 1
-        fig.suptitle(wrapped, y=0.995, fontsize=fontsize + 2)
+        fig.suptitle(wrapped, y=0.995, fontsize=fontsize + 4)
     fig.text(
         0.5, 0.057,
         'Rows are saved windows; slot numbers are within saved batches.',
-        ha='center', fontsize=fontsize - 1,
+        ha='center', fontsize=fontsize - 2,
     )
     if legend:
         handles, labels = axes[0, 0].get_legend_handles_labels()
@@ -621,8 +622,8 @@ def pred_vs_target_plot(
             bbox_to_anchor=(0.5, 0.01), ncol=len(labels),
             frameon=False, fontsize=fontsize,
         )
-    top = 0.95 - 0.025 * max(0, lines - 1)
-    fig.tight_layout(rect=(0.03, 0.09, 1, top), h_pad=0.3)
+    top = 0.97 - 0.020 * max(0, lines - 1)
+    fig.tight_layout(rect=(0.03, 0.09, 1, top), h_pad=0.5)
     pending = output.with_name(f'.{output.name}.{os.getpid()}.pending')
     try:
         fig.savefig(pending, format='pdf')

@@ -16,9 +16,9 @@ import pandas as pd
 
 from analysis import plots
 
-FIGURE_WIDTH = 7.2
-FIGURE_HEIGHT = 6.0
-LINE_WIDTH = 2.0
+FIGURE_WIDTH = 9.5
+FIGURE_HEIGHT = 7.5
+LINE_WIDTH = 2.5
 TITLE_WIDTH = 55
 X_MARGIN = 0.08
 Y_MARGIN = 0.08
@@ -55,7 +55,7 @@ def plot_scaling_panels(
     models = list(MODEL_STYLES)
     if set(summary['model']) != set(models):
         raise ValueError(f'Expected models {models} in {path}.')
-    sns.set_theme(style='ticks', context='paper')
+    sns.set_theme(style='ticks', context='talk', font_scale=0.9)
     colors = dict(zip(models, plots.get_model_colors(models)))
     fig, axes = plt.subplots(2, 1, figsize=(FIGURE_WIDTH, FIGURE_HEIGHT))
     for ax, (metric, ylabel) in zip(axes, METRICS):
@@ -91,17 +91,20 @@ def plot_scaling_panels(
         ax.set_xlim(ticks[0] * (1 - X_MARGIN),
                     ticks[-1] * (1 + X_MARGIN))
         ax.set_xticks(ticks, labels=[str(value) for value in ticks])
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel(ylabel, fontsize=14)
+        ax.tick_params(axis='both', labelsize=12)
         ax.legend().remove()
         sns.despine(ax=ax)
-    axes[-1].set_xlabel(x_label)
+    axes[-1].set_xlabel(x_label, fontsize=14)
     axes[0].set_xlabel('')
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.01),
-        ncol=len(models), frameon=False,
+        ncol=len(models), frameon=False, fontsize=14,
     )
-    fig.suptitle(fill(title, TITLE_WIDTH), y=0.98)
-    fig.tight_layout(rect=(0, 0.07, 1, 0.94))
+    fig.suptitle(
+        fill(title, TITLE_WIDTH), y=0.99, fontsize=17
+    )
+    fig.tight_layout(rect=(0, 0.10, 1, 0.90))
     fig.savefig(path)
     plt.close(fig)

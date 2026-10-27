@@ -30,7 +30,7 @@ from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
 from utils.campaigns.lifecycle import CampaignLog
 
-FIGURE_VERSION = 1
+FIGURE_VERSION = 2
 PREDICTION_DIMS = (0, 20, 50, -1)
 EXAMPLE_COUNT = 10
 FIGURE_NAMES = (
@@ -146,8 +146,8 @@ def _save_training_dynamics(
     config: NeuralPredictionConfig, table: pd.DataFrame,
 ) -> None:
     """Save loss and MAE curves with both splits in each panel."""
-    sns.set_theme(style='ticks', context='paper')
-    fig, axes = plt.subplots(2, 1, figsize=(7.2, 6.0))
+    sns.set_theme(style='ticks', context='talk', font_scale=0.9)
+    fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.5))
     label = config.dataset_label[0]
     x = table['Epoch'].to_numpy(dtype=float) + 1
     train_color = plots.get_model_colors([config.model_label])[0]
@@ -160,32 +160,36 @@ def _save_training_dynamics(
         sns.lineplot(
             x=x, y=table[train_column].to_numpy(dtype=float),
             ax=ax, label='Train', color=train_color,
-            linewidth=2.0, linestyle='-', estimator=None,
+            linewidth=2.5, linestyle='-', estimator=None,
         )
         sns.lineplot(
             x=x, y=table[val_column].to_numpy(dtype=float),
             ax=ax, label='Validation', color='#3C4147',
-            linewidth=2.0, linestyle='--', estimator=None,
+            linewidth=2.5, linestyle='--', estimator=None,
         )
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel(ylabel, fontsize=14)
+        ax.tick_params(axis='both', labelsize=12)
         ax.legend().remove()
         sns.despine(ax=ax)
     axes[0].set_xlabel('')
-    axes[-1].set_xlabel('Epoch (one-based)')
+    axes[-1].set_xlabel('Epoch (one-based)', fontsize=14)
     for ax in axes:
         if x[0] == x[-1]:
             ax.set_xlim(x[0] - 0.5, x[0] + 0.5)
         else:
             ax.set_xlim(max(1, x[0]), x[-1])
-    title = fill(f'{fit_title(config)} | Training dynamics', width=62)
+    title = fill(
+        f'{fit_title(config)} | Training dynamics', width=68
+    )
     lines = title.count('\n') + 1
-    fig.suptitle(title, y=0.99, fontsize=11)
+    fig.suptitle(title, y=0.99, fontsize=17)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(
         handles, labels, loc='lower center',
         bbox_to_anchor=(0.5, 0.015), ncol=2, frameon=False,
+        fontsize=14,
     )
-    fig.tight_layout(rect=(0, 0.08, 1, 0.94 - 0.045 * (lines - 1)))
+    fig.tight_layout(rect=(0, 0.08, 1, 0.96 - 0.025 * (lines - 1)))
     output = Path(config.save_path) / 'training_dynamics.pdf'
     pending = output.with_name(f'.{output.name}.{os.getpid()}.pending')
     try:
