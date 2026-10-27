@@ -11,30 +11,15 @@ mean/standard error, and population count. No fit artifacts are copied.
 
 from datetime import datetime, timezone
 from pathlib import Path
-from textwrap import fill
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
 
-from analysis import plots
+from analysis.scaling_plots import plot_scaling_panels
 from configs.campaigns.ahrens_length import load_ahrens_length_campaign
 from configs.config_global import FIG_DIR
 from configs.experiments import ahrens_length_lowpass_four
 from utils.artifacts import fit_id, validate_complete
-
-FIGURE_WIDTH = 7.2
-FIGURE_HEIGHT = 6.0
-LINE_WIDTH = 2.0
-TITLE_WIDTH = 55
-X_MARGIN = 0.08
-Y_MARGIN = 0.08
-METRICS = (
-    ('test_score', 'Test score relative to last-frame copy'),
-    ('test_loss', 'Test loss (MSE)'),
-)
-
 
 def read_fit_results() -> pd.DataFrame:
     """Read one finite test result for each required completed fit.
@@ -143,67 +128,21 @@ def summarize_population(
 
 
 def plot_population(summary: pd.DataFrame, path: Path) -> None:
-    """Save a paired score/loss PDF using shared model colors.
+    """Save paired score and loss panels for one population.
 
     Parameters
     ----------
     summary : pandas.DataFrame
         One population with mean and standard error columns.
     path : Path
-        New PDF output path.
+        Absolute PDF output path.
     """
-    sns.set_theme(style='ticks', context='paper')
-    models = ['POCO', 'NLinear']
-    colors = dict(zip(models, plots.get_model_colors(models)))
-    fig, axes = plt.subplots(2, 1, figsize=(FIGURE_WIDTH, FIGURE_HEIGHT))
-    for ax, (metric, ylabel) in zip(axes, METRICS):
-        for model in models:
-            rows = summary.loc[summary['model'] == model].sort_values(
-                'nominal_length'
-            )
-            if rows.empty:
-                raise ValueError(f'Missing {model} results in {path}.')
-            x = rows['nominal_length'].to_numpy(dtype=float)
-            mean = rows[f'{metric}_mean'].to_numpy(dtype=float)
-            sem = rows[f'{metric}_sem'].to_numpy(dtype=float)
-            sns.lineplot(
-                x=x, y=mean, ax=ax, color=colors[model],
-                linewidth=LINE_WIDTH, marker='o', label=model,
-                linestyle='-' if model == 'POCO' else '--',
-            )
-            ax.fill_between(
-                x, mean - sem, mean + sem,
-                color=colors[model], alpha=0.18,
-            )
-        limits = summary[
-            [f'{metric}_mean', f'{metric}_sem']
-        ].to_numpy(dtype=float)
-        lower = np.min(limits[:, 0] - limits[:, 1])
-        upper = np.max(limits[:, 0] + limits[:, 1])
-        span = upper - lower
-        if span <= 0:
-            raise ValueError(f'No {metric} range for {path}.')
-        ax.set_ylim(lower - Y_MARGIN * span, upper + Y_MARGIN * span)
-        ax.set_xscale('log', base=2)
-        lengths = np.sort(summary['nominal_length'].unique())
-        ax.set_xlim(lengths[0] * (1 - X_MARGIN),
-                    lengths[-1] * (1 + X_MARGIN))
-        ax.set_xticks(lengths, labels=[str(x) for x in lengths])
-        ax.set_ylabel(ylabel)
-        ax.legend().remove()
-        sns.despine(ax=ax)
-    axes[-1].set_xlabel('Nominal recording length (frames; 60% train cap)')
-    axes[0].set_xlabel('')
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.01),
-        ncol=len(models), frameon=False,
+    population = summary['population'].iloc[0].replace('_', ' ')
+    plot_scaling_panels(
+        summary, 'nominal_length',
+        'Nominal recording length (frames; 60% train cap)',
+        f'Low-pass Ahrens: {population}', path, log2_x=True,
     )
-    title = summary['population'].iloc[0].replace('_', ' ')
-    fig.suptitle(fill(f'Low-pass Ahrens: {title}', TITLE_WIDTH), y=0.98)
-    fig.tight_layout(rect=(0, 0.07, 1, 0.94))
-    fig.savefig(path)
-    plt.close(fig)
 
 
 def analyze_ahrens_length() -> Path:
