@@ -1,0 +1,8 @@
+{
+  "subjects": ["subject_11", "subject_8", "subject_09", "subject_18"],
+  "nominal_lengths": [256, 512, 1024, 1536, 2048, 3072],
+  "models": ["POCO", "NLinear"],
+  "seeds": 2,
+  "filter": "lowpass",
+  "max_batch": 10000
+}
