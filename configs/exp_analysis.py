@@ -686,6 +686,13 @@ def compare_train_length_analysis():
     compare_train_length_zebrafish_ahrens_analysis()
 
 
+def ahrens_length_lowpass_four_analysis() -> None:
+    """Save the four-subject low-pass length scaling summary."""
+    from analysis.recording_length import analyze_ahrens_length
+
+    analyze_ahrens_length()
+
+
 def compare_train_length_zebrafish_ahrens_analysis() -> None:
     """Plot Ahrens recording-length scaling only."""
     cfgs = experiments.compare_train_length_zebrafish_ahrens()
