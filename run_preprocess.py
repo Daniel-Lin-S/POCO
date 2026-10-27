@@ -1,25 +1,47 @@
-from preprocess.generate_sim import save_sim_activity
-from preprocess.zebrafish import process_zebrafish_activity, process_zebrafish_ahrens_activity
-from preprocess.celegans import celegans_flavell_preprocess, celegans_zimmer_preprocess
+"""Run one named neural preprocessing task.
+
+Usage: ``python run_preprocess.py --dataset zebrafish_ahrens
+[--filter none|lowpass|highpass|bandpass]``. Ahrens input is the locally
+configured raw subject directory; output is subject-named NPZ archives in
+the locally configured processed directory. Other datasets use their
+configured raw and processed directories.
+"""
+
+import argparse
+
+from preprocess.celegans import (
+    celegans_flavell_preprocess, celegans_zimmer_preprocess,
+)
 from preprocess.mice import mice_preprocess
+from preprocess.zebrafish import (
+    process_zebrafish_activity, process_zebrafish_ahrens_activity,
+)
+
+FILTERED_PROCESSORS = {
+    'zebrafish_ahrens': process_zebrafish_ahrens_activity,
+    'celegans_zimmer': celegans_zimmer_preprocess,
+    'celegans_flavell': celegans_flavell_preprocess,
+    'mice': mice_preprocess,
+}
+FILTER_CHOICES = ('none', 'lowpass', 'highpass', 'bandpass')
+
+
+def main() -> None:
+    """Run exactly the requested preprocessing task."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--dataset', required=True,
+        choices=(*FILTERED_PROCESSORS, 'zebrafish'),
+    )
+    parser.add_argument('--filter', choices=FILTER_CHOICES, default='none')
+    args = parser.parse_args()
+    if args.dataset == 'zebrafish':
+        if args.filter != 'none':
+            parser.error('zebrafish supports only --filter none.')
+        process_zebrafish_activity()
+    else:
+        FILTERED_PROCESSORS[args.dataset](filter_mode=args.filter)
+
 
 if __name__ == '__main__':
-
-    # get simulated data
-    # save_sim_activity()
-
-    # load and process spontaneous fish activity
-    # process_zebrafish_activity()
-
-    for filter_mode in ['none', ]: # No filter used by default, but can add 'lowpass', 'bandpass' version as needed
-
-        process_zebrafish_ahrens_activity(filter_mode=filter_mode)
-
-        celegans_zimmer_preprocess(filter_mode=filter_mode)
-        # celegans_flavell_preprocess(filter_mode=filter_mode)
-
-        # mice_preprocess(filter_mode=filter_mode)
-
-        # preprocess_zebrafish_jain(filter_mode=filter_mode)
-
-        continue
+    main()

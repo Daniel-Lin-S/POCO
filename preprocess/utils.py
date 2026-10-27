@@ -17,7 +17,7 @@ from scipy import signal
 from sklearn.decomposition import PCA
 from configs.config_global import FIG_DIR
 from configs.configs import DatasetConfig
-from utils.split_utils import train_validation_mask
+from utils.split_utils import chronological_bounds, train_validation_mask
 
 def bandpass(traces, f_l, f_h, sampling_freq=1):
     """
@@ -44,6 +44,48 @@ def bandpass(traces, f_l, f_h, sampling_freq=1):
     filtered = signal.sosfilt(sos, filtered)
     filtered = np.flip(filtered, axis=1)
     return filtered
+
+FILTER_BANDS = {
+    'lowpass': (1e-6, 0.2),
+    'highpass': (0.001, 0.99),
+    'bandpass': (0.001, 0.2),
+}
+
+
+def filter_split_segments(data: np.ndarray, config: DatasetConfig,
+                          mode: str) -> np.ndarray:
+    """Filter each chronological split independently.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Activity with shape ``(neurons, time)``.
+    config : DatasetConfig
+        Chronological split fractions.
+    mode : str
+        One of lowpass, highpass, or bandpass.
+
+    Returns
+    -------
+    np.ndarray
+        Filtered activity with shape ``(neurons, time)``.
+    """
+    if mode not in FILTER_BANDS:
+        raise ValueError(f'Unknown filter mode: {mode}.')
+    train_end, val_end = chronological_bounds(
+        data.shape[1], config.train_split, config.val_split,
+        config.test_split
+    )
+    result = np.empty_like(data)
+    for left, right in ((0, train_end),
+                        (train_end, val_end),
+                        (val_end, data.shape[1])):
+        result[:, left:right] = bandpass(
+            data[:, left:right], *FILTER_BANDS[mode]
+        )
+    if not np.isfinite(result).all():
+        raise ValueError('Filtered activity contains non-finite values.')
+    return result
 
 def run_pca(
     data: np.ndarray,
@@ -106,15 +148,36 @@ def run_pca(
     print('')
     return act.T
 
-def get_clustered_data(data, n_clusters=500, seed=0):
+def get_clustered_data(
+    data: np.ndarray,
+    fit_mask: np.ndarray,
+    n_clusters: int = 500,
+    seed: int = 0,
+) -> np.ndarray:
+    """Cluster neurons using train and validation correlations.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Activity with shape ``(neurons, time)``.
+    fit_mask : np.ndarray
+        Boolean mask with shape ``(time,)`` excluding test samples.
+    n_clusters : int, optional
+        Number of functional clusters, default 500.
+    seed : int, optional
+        KMeans random seed, default 0.
+
+    Returns
+    -------
+    np.ndarray
+        Cluster activity with shape ``(clusters, time)``.
     """
-    Do KMeans clustering on correlation matrix
-    data: n_neurons * T
-    return: n_clusters * T
-    """
-    corr_matrix = np.corrcoef(data)
+    corr_matrix = np.corrcoef(data[:, fit_mask])
     print("Correlation Matrix Shape: ", corr_matrix.shape)
-    corr_matrix[np.isnan(corr_matrix)] = 0
+    if not np.isfinite(corr_matrix).all():
+        raise ValueError(
+            'Train/validation correlation matrix is non-finite.'
+        )
     kmeans = KMeans(n_clusters=n_clusters, random_state=seed).fit(corr_matrix)
     labels = kmeans.labels_
     
@@ -175,10 +238,8 @@ def process_data_matrix(
     n, T = data.shape
     split_config = DatasetConfig()
     fit_mask = train_validation_mask(
-        T,
-        split_config.patch_length,
-        split_config.train_split,
-        split_config.val_split,
+        T, split_config.train_split, split_config.val_split,
+        split_config.test_split,
     )
     sub_fig_dir = os.path.join(FIG_DIR, fig_dir, exp_name)
 
@@ -231,20 +292,16 @@ def process_data_matrix(
             "fitting on train and validation samples."
         )
 
-    if filter_mode == 'lowpass':
-        normalized = bandpass(normalized, f_l=1e-6, f_h=0.2)
-    elif filter_mode == 'highpass':
-        normalized = bandpass(normalized, f_l=0.001, f_h=0.99)
-    elif filter_mode == 'bandpass':
-        normalized = bandpass(normalized, f_l=0.001, f_h=0.2)
-    else:
-        assert filter_mode == 'none', f"Unknown filter mode {filter_mode}"
+    if filter_mode != 'none':
+        normalized = filter_split_segments(
+            normalized, split_config, filter_mode
+        )
 
     print(f"Data shape: {data.shape}, Valid indices: {roi_indices.sum()}")
-    data_dict['fit_split'] = 'train_val'
-    data_dict['fit_patch_length'] = split_config.patch_length
+    data_dict['fit_split'] = 'chronological_train_val'
     data_dict['fit_train_split'] = split_config.train_split
     data_dict['fit_val_split'] = split_config.val_split
+    data_dict['fit_filter_isolated'] = True
     data_dict['valid_indices'] = roi_indices
     data_dict['M'] = normalized
 
@@ -294,5 +351,7 @@ def process_data_matrix(
     plt.close()
 
     for n_cluster in n_clusers:
-        data_dict[f'FC_{n_cluster}'] = get_clustered_data(normalized, n_cluster)
+        data_dict[f'FC_{n_cluster}'] = get_clustered_data(
+            normalized, fit_mask, n_cluster
+        )
     return data_dict

@@ -1,6 +1,14 @@
+"""Define project paths and shared plot settings.
+
+Input is repository-local ``.poco_local.json`` with an absolute
+``artifact_root`` value. Fit artifacts and figures are written below that
+root; Ahrens raw and processed roots can also be set locally.
+"""
+
 import os
 import os.path as osp
 import logging
+import json
 import torch
 
 NP_SEED = 233
@@ -8,11 +16,44 @@ TCH_SEED = 3407
 
 # Directory paths
 ROOT_DIR = osp.dirname(osp.dirname(osp.abspath(__file__)))
-FIG_DIR = osp.join(ROOT_DIR, 'figures')
+LOCAL_CONFIG = osp.join(ROOT_DIR, '.poco_local.json')
+if not osp.isfile(LOCAL_CONFIG):
+    raise FileNotFoundError(
+        f'Create {LOCAL_CONFIG} with an absolute artifact_root.'
+    )
+with open(LOCAL_CONFIG, encoding='utf-8') as local_file:
+    local_paths = json.load(local_file)
+
+
+def local_absolute_path(key: str, fallback: str | None = None) -> str:
+    """Resolve and validate one locally configured absolute directory.
+
+    Parameters
+    ----------
+    key : str
+        Key in the ignored local configuration.
+    fallback : str or None, optional
+        Default absolute directory, default None.
+
+    Returns
+    -------
+    str
+        Absolute configured directory.
+    """
+    value = local_paths.get(key, fallback)
+    if not isinstance(value, str) or not osp.isabs(value):
+        raise ValueError(f'{key} must be an absolute directory path.')
+    return value
+
+
+ARTIFACT_ROOT = local_absolute_path('artifact_root')
+FIG_DIR = osp.join(ARTIFACT_ROOT, 'figures')
 DATA_DIR = os.path.join(ROOT_DIR, 'data')
 
 ZEBRAFISH_RAW_DIR = os.path.join(DATA_DIR, 'raw_zebrafish')
-ZEBRAFISH_AHRENS_RAW_DIR = os.path.join(DATA_DIR, 'raw_zebrafish_ahrens')
+ZEBRAFISH_AHRENS_RAW_DIR = local_absolute_path(
+    'ahrens_raw_dir', os.path.join(DATA_DIR, 'raw_zebrafish_ahrens')
+)
 EXP_TYPES = ['control', 'shocked', 'reshocked', 'ketamine']
 CELEGANS_RAW_DIR = os.path.join(DATA_DIR, 'raw_celegans_zimmer')
 CELEGANS_FLAVELL_RAW_DIR = os.path.join(DATA_DIR, 'raw_celegans_flavell')
@@ -21,14 +62,16 @@ MICE_BRAIN_AREAS = ['PPC', 'RSP', 'V1', 'M2']
 ZEBRAFISH_BRAIN_AREAS = ['LHb', 'MHb', 'gc', 'raphe', 'ctel', 'vent', 'dthal', 'vthal', ]
 
 N_ZEBRAFISH_SESSIONS = 19
-N_ZEBRAFISH_AHNRENS_SESSIONS = 15
 N_CELEGANS_SESSIONS = 5
 N_CELEGANS_FLAVELL_SESSIONS = 40
 N_MICE_SESSIONS = 12
 
 RAW_DATA_SUFFIX = '_CNMF_compressed.h5'
 ZEBRAFISH_PROCESSED_DIR = os.path.join(DATA_DIR, 'processed_zebrafish')
-ZEBRAFISH_AHRENS_PROCESSED_DIR = os.path.join(DATA_DIR, 'processed_zebrafish_ahrens')
+ZEBRAFISH_AHRENS_PROCESSED_DIR = local_absolute_path(
+    'ahrens_processed_dir',
+    os.path.join(DATA_DIR, 'processed_zebrafish_ahrens')
+)
 CELEGANS_PROCESSED_DIR = os.path.join(DATA_DIR, 'processed_celegans_zimmer')
 CELEGANS_FLAVELL_PROCESSED_DIR = os.path.join(DATA_DIR, 'processed_celegans_flavell')
 MICE_PROCESSED_DIR = os.path.join(DATA_DIR, 'processed_mice')

@@ -1,31 +1,49 @@
-import os
-import os.path as osp
-import torch
-import logging
+"""Create train, validation, and test iterators for POCO fits.
 
-from torch.utils.data import DataLoader, Subset
+Input is a resolved dataset configuration and phase. Output is one DataLoader
+per dataset label. Training drops partial batches to keep examples per step
+fixed; validation and test retain every window.
+"""
 
-from configs.configs import BaseConfig, NeuralPredictionConfig, DatasetConfig
+from torch.utils.data import DataLoader
+
+from configs.configs import NeuralPredictionConfig, DatasetConfig
 import datasets
-from configs.config_global import ROOT_DIR
 
 class DatasetIters(object):
 
-    def __init__(self, config: NeuralPredictionConfig, phase: str):
+    def __init__(self, config: NeuralPredictionConfig,
+                 phase: str) -> None:
+        """Build phase-specific iterators for all configured datasets.
+
+        Parameters
+        ----------
+        config : NeuralPredictionConfig
+            Resolved dataset and batch settings.
+        phase : str
+            One of train, val, or test.
         """
-        Initialize a list of data loaders, compatible with multi-dataset/multi-task training.
-        if only one dataset is specified, return a list containing one data loader
-        """
+        if phase not in ('train', 'val', 'test'):
+            raise ValueError(f'Unknown dataset phase: {phase}.')
         if type(config.dataset) is list or type(config.dataset) is tuple:
             dataset_list = config.dataset
         elif type(config.dataset) is str:
             dataset_list = [config.dataset]
         else:
-            raise NotImplementedError('Dataset config not recognized')
+            raise ValueError(
+                f'Expected dataset names, got {type(config.dataset)}.'
+            )
 
         self.num_datasets = len(dataset_list)
         self.phase = phase
-        assert len(config.mod_w) == self.num_datasets, 'mod_w and dataset len must match'
+        if self.num_datasets == 0:
+            raise ValueError('No datasets were configured for this fit.')
+        if (len(config.mod_w) != self.num_datasets or
+                len(config.dataset_label) != self.num_datasets):
+            raise ValueError(
+                'Dataset labels and weights must match dataset count '
+                f'{self.num_datasets}.'
+            )
 
         self.data_iters = []
         self.iter_lens = []
@@ -43,27 +61,55 @@ class DatasetIters(object):
 
         self.reset()
 
-    def reset(self):
-        # recreate iterator for each of the dataset
+    def reset(self) -> None:
+        """Start a fresh epoch of phase-specific batches."""
         self.data_iters = []
         self.iter_lens = []
         for data_l in self.data_loaders:
             data_iter = iter(data_l)
             self.data_iters.append(data_iter)
-            self.iter_lens.append(len(data_iter))
+            length = len(data_iter)
+            if length == 0:
+                raise ValueError(
+                    f'{self.phase} dataset has no full batches.'
+                )
+            self.iter_lens.append(length)
         self.min_iter_len = min(self.iter_lens)
 
-    def get_baselines(self, key='session_copy_mse'):
-        assert self.phase != 'train', 'Baselines are only computed for test and val'
+    def get_baselines(self, key: str = 'session_copy_mse') -> list:
+        """Return per-session baselines for validation or test."""
+        if self.phase == 'train':
+            raise ValueError(
+                'Baselines require validation or test data.'
+            )
         all_baselines = []
         for loader in self.data_loaders:
             all_baselines.extend(loader.dataset.baseline[key])
         return all_baselines
 
-def init_single_dataset(dataset_name: str, phase: str, config: DatasetConfig):
-    collate_f = None
+def init_single_dataset(dataset_name: str, phase: str,
+                        config: DatasetConfig) -> tuple:
+    """Construct one phase-specific dataset and batch loader.
+
+    Parameters
+    ----------
+    dataset_name : str
+        Registered recording family.
+    phase : str
+        One of train, val, or test.
+    config : DatasetConfig
+        Resolved session and batch settings.
+
+    Returns
+    -------
+    tuple
+        DataLoader, per-session unit counts, and unit-type arrays.
+    """
     train_flag = phase == 'train'
-    input_size = None
+    if config.batch_size is None or config.batch_size < 1:
+        raise ValueError(
+            f'Expected a positive batch size, got {config.batch_size}.'
+        )
 
     if dataset_name == 'zebrafish':
         dataset = datasets.Zebrafish(config, phase=phase)
@@ -78,12 +124,13 @@ def init_single_dataset(dataset_name: str, phase: str, config: DatasetConfig):
     elif dataset_name == 'mice':
         dataset = datasets.Mice(config, phase=phase)
     else:
-        raise NotImplementedError('Dataset not implemented')
+        raise ValueError(f'Unknown dataset: {dataset_name}.')
 
-    collate_f = dataset.collate_fn
-    input_size = dataset.input_size
-    unit_types = dataset.unit_types
-    data_loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=train_flag or config.shuffle_test,
-                             num_workers=config.num_workers, collate_fn=collate_f)
+    data_loader = DataLoader(
+        dataset, batch_size=config.batch_size,
+        shuffle=train_flag or config.shuffle_test,
+        drop_last=train_flag, num_workers=config.num_workers,
+        collate_fn=dataset.collate_fn
+    )
 
-    return data_loader, input_size, unit_types
+    return data_loader, dataset.input_size, dataset.unit_types

@@ -178,7 +178,6 @@ class DatasetConfig:
         self.train_split = 0.6
         self.val_split = 0.2
         self.test_split = 0.2
-        self.patch_length = 1000 # train and val sets will be divided in each patch_length segment
         self.session_ids = None # if not None, only use data from these sessions
         self.animal_ids = None # if not None, only use data from these animals
         self.pc_dim = 512 # number of principal components to used for training, if None, predict original data
@@ -219,6 +218,7 @@ class NeuralPredictionConfig(SupervisedLearningBaseConfig):
         super().__init__()
 
         self.task_type = 'neural_prediction'
+        self.split_protocol = 'chronological_60_20_20_v1'
 
         self.seq_length = 64 # the total length of a sequence
         self.pred_length = 16 # the last pred_length frames will be predicted

@@ -1,20 +1,25 @@
-"""
-Change data to numpy format, compute delta F / F
+"""Convert raw zebrafish recordings into processed neural archives.
+
+Input for Ahrens is a raw root containing ``subject_<id>/TimeSeries.h5``.
+Output is ``subject_<id>.npz`` in the configured processed directory,
+containing M, PC, valid_indices, source_subject, and split-fit metadata.
+The other zebrafish dataset retains its existing raw HDF5 layout.
 """
 
 import h5py
 import os
+import tempfile
+from pathlib import Path
 import numpy as np
-import scipy.io as sio
-import analysis.plots as plots
 
 from configs.config_global import \
-    ZEBRAFISH_RAW_DIR, EXP_TYPES, ZEBRAFISH_PROCESSED_DIR, RAW_DATA_SUFFIX, \
-    ZEBRAFISH_AHRENS_RAW_DIR, ZEBRAFISH_AHRENS_PROCESSED_DIR
-from utils.data_utils import get_exp_names, get_stim_exp_names
-from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
-from .utils import bandpass, run_pca, process_data_matrix
+    ZEBRAFISH_RAW_DIR, EXP_TYPES, ZEBRAFISH_PROCESSED_DIR, RAW_DATA_SUFFIX
+from utils.data_utils import get_exp_names
+from .utils import process_data_matrix
+from utils.ahrens_sessions import (
+    processed_directory, raw_subject_directories,
+    validate_processed_subject,
+)
 
 def process_zebrafish_activity():
     exp_names = get_exp_names()
@@ -58,48 +63,79 @@ def process_zebrafish_activity():
                 
                 np.savez(out_filename, **data_dict)
 
-def process_zebrafish_ahrens_activity(filter_mode='none'):
+AHRENS_PREPROCESS_PC_DIM = 2048
 
-    processed_dir = ZEBRAFISH_AHRENS_PROCESSED_DIR
-    if filter_mode != 'none':
-        processed_dir = os.path.join(processed_dir + '_' + filter_mode)
 
-    os.makedirs(processed_dir, exist_ok=True)
+def save_processed_subject(
+    output: Path, processed: dict[str, object],
+) -> None:
+    """Publish one complete subject archive without replacing another.
 
-    count = 0
-    for subject_id in range(1, 19):
-        sub_dir = os.path.join(ZEBRAFISH_AHRENS_RAW_DIR, f'subject_{subject_id}')
-        filename = os.path.join(sub_dir, 'TimeSeries.h5')
-        mat_filename = os.path.join(sub_dir, 'data_full.mat')
+    Parameters
+    ----------
+    output : Path
+        Absolute path to a new ``subject_<id>.npz`` archive.
+    processed : dict[str, object]
+        M, PC, source_subject, and split-fit metadata arrays.
+    """
+    descriptor, pending = tempfile.mkstemp(
+        prefix=f'.{output.stem}.', suffix='.pending', dir=output.parent
+    )
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            np.savez(stream, **processed)
+        os.link(pending, output)
+    finally:
+        os.unlink(pending)
 
-        try:
-            f = h5py.File(filename, "r")
-        except:
-            print(f"Subject {subject_id}: Cannot open TimeSeries.h5")
+
+def process_zebrafish_ahrens_activity(
+    filter_mode: str = 'none',
+) -> None:
+    """Process each named Ahrens subject without renumbering sessions.
+
+    Parameters
+    ----------
+    filter_mode : str, optional
+        Neural activity filter, default 'none'.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a discovered subject lacks its TimeSeries.h5 file.
+    ValueError
+        If an existing subject archive is incomplete or invalid.
+    """
+    subjects = raw_subject_directories()
+    output_dir = processed_directory(filter_mode)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for subject_dir in subjects:
+        source = subject_dir / 'TimeSeries.h5'
+        if not source.is_file():
+            raise FileNotFoundError(
+                f'Ahrens subject is missing TimeSeries.h5: {source}'
+            )
+        output = output_dir / f'{subject_dir.name}.npz'
+        if output.exists():
+            validate_processed_subject(output, filter_mode)
             continue
-
-        data_dict = {}
-        for key in f.keys():
-            data_dict[key] = np.array(f[key])
-        print(data_dict.keys())
-        
-        data = sio.loadmat(mat_filename, squeeze_me=True, struct_as_record=False)['data']
-
-        p = data.periods
-        A = data.Behavior_full_motorseed
-        B = data.BehaviorAvr_motorseed
-
-        activity = data_dict['CellResp'].T
-        return_dict = process_data_matrix(
+        with h5py.File(source, 'r') as recording:
+            if 'CellResp' not in recording:
+                raise KeyError(f'Missing CellResp in {source}.')
+            activity = np.asarray(recording['CellResp']).T
+        if activity.ndim != 2 or min(activity.shape) < 1:
+            raise ValueError(
+                f'Expected nonempty 2D CellResp in {source}, '
+                f'got {activity.shape}.'
+            )
+        processed = process_data_matrix(
             activity,
             f'preprocess/{filter_mode}/zebrafish_ahrens',
-            pc_dim=2048,
-            exp_name=f'subject_{subject_id}',
-            filter_mode=filter_mode
+            pc_dim=AHRENS_PREPROCESS_PC_DIM,
+            exp_name=subject_dir.name,
+            filter_mode=filter_mode,
         )
-        data_dict = {}
-        data_dict.update(return_dict)
-
-        out_filename = os.path.join(processed_dir, f'{count}.npz')
-        count += 1
-        np.savez(out_filename, **data_dict)
+        processed['source_subject'] = subject_dir.name
+        processed['filter_mode'] = filter_mode
+        save_processed_subject(output, processed)

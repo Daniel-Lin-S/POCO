@@ -1,7 +1,7 @@
 """Load processed neural recordings for prediction.
 
 Input archives contain M (neurons by time), optional PC (components by
-time), and split-fit metadata: fit_split, fit_patch_length,
+time), and split-fit metadata: fit_split,
 fit_train_split, and fit_val_split. Species archives also include unit
 labels such as neuron_names or area_ids. Each dataset yields time windows
 and session metadata; the collator yields per-session input and target
@@ -18,12 +18,15 @@ import os
 
 from tqdm import tqdm
 from configs.configs import DatasetConfig
-from utils.split_utils import train_validation_mask
+from utils.split_utils import chronological_bounds, train_validation_mask
 from configs.config_global import \
-    ZEBRAFISH_PROCESSED_DIR,ZEBRAFISH_AHRENS_PROCESSED_DIR, N_ZEBRAFISH_AHNRENS_SESSIONS, \
+    ZEBRAFISH_PROCESSED_DIR, \
     CELEGANS_PROCESSED_DIR, N_CELEGANS_SESSIONS, CELEGANS_FLAVELL_PROCESSED_DIR, N_CELEGANS_FLAVELL_SESSIONS, \
     SIM_DIR, MICE_PROCESSED_DIR, ZEBRAFISH_BRAIN_AREAS
 from utils.data_utils import get_exp_names, get_stim_exp_names, get_mice_sessions
+from utils.ahrens_sessions import (
+    processed_directory, processed_subject_names,
+)
 
 def require_train_validation_fit(
     data: np.lib.npyio.NpzFile,
@@ -47,10 +50,10 @@ def require_train_validation_fit(
         If the archive was fitted on different time points.
     """
     expected = {
-        'fit_split': 'train_val',
-        'fit_patch_length': config.patch_length,
+        'fit_split': 'chronological_train_val',
         'fit_train_split': config.train_split,
         'fit_val_split': config.val_split,
+        'fit_filter_isolated': True,
     }
     if any(key not in data or data[key].item() != value
            for key, value in expected.items()):
@@ -116,19 +119,16 @@ class NeuralDataset(tud.Dataset):
         for all_activity in all_activities:
                     
             all_activity: np.ndarray
-            # For each fish, split the data into patches
             length = all_activity.shape[1]
-            if phase == 'train':
-                length = min(length, config.train_data_length)
-            patch_length = config.patch_length
-            segments = max(1, length // patch_length)
+            train_end, val_end = chronological_bounds(
+                length, config.train_split, config.val_split,
+                config.test_split
+            )
             self.input_size.append(all_activity.shape[0])
 
             fit_mask = train_validation_mask(
-                all_activity.shape[1],
-                patch_length,
-                config.train_split,
-                config.val_split,
+                length, config.train_split, config.val_split,
+                config.test_split,
             )
             fit_activity = all_activity[:, fit_mask]
             if config.normalize_mode == 'minmax':
@@ -152,27 +152,28 @@ class NeuralDataset(tud.Dataset):
                     "fitting on train and validation samples."
                 )
             
-            for patch in range(segments):
-                patch_start = patch * patch_length
-                patch_end = (patch + 1) * patch_length if patch < segments - 1 else length
-                activity = all_activity[:, patch_start: patch_end]
-                cur_length = activity.shape[1]
+            if phase == 'train':
+                activity = all_activity[:, :train_end]
+            elif phase == 'val':
+                activity = all_activity[:, train_end:val_end]
+            elif phase == 'test':
+                activity = all_activity[:, val_end:]
+            else:
+                raise ValueError(f'Unknown dataset phase: {phase}.')
 
-                train_split = int(cur_length * config.train_split)
-                val_split = int(cur_length * (config.train_split + config.val_split))
-
-                # split the data into train, val, test in each patch
-                if phase == 'train':
-                    activity = activity[:, : train_split]
-                elif phase == 'val':
-                    activity = activity[:, train_split: val_split]
-                elif phase == 'test':
-                    activity = activity[:, val_split: ]
-                else:
-                    raise NotImplementedError(phase)
-                
-                self.session_id.append(session_idx)
-                self.neural_data.append(activity)
+            activity = self.downsample(activity)
+            if phase == 'train':
+                limit = int(
+                    config.train_data_length * config.train_split
+                )
+                activity = activity[:, :limit]
+            if activity.shape[1] <= config.seq_length:
+                raise ValueError(
+                    f'{phase} split has {activity.shape[1]} samples, '
+                    f'but seq_length is {config.seq_length}.'
+                )
+            self.session_id.append(session_idx)
+            self.neural_data.append(activity)
 
             session_idx += 1
         
@@ -451,7 +452,6 @@ class Zebrafish(NeuralDataset):
 
                 filename = os.path.join(ZEBRAFISH_PROCESSED_DIR, exp_name + '.npz')
                 all_activity, unit_type = self.get_activity_unit_id(filename, config)
-                all_activity = self.downsample(all_activity)
                 all_activities.append(all_activity)
                 all_unit_types.append(unit_type)
 
@@ -459,46 +459,86 @@ class Zebrafish(NeuralDataset):
     
 class ZebrafishAhrens(Zebrafish):
 
-    def get_activity_unit_id(self, filename, config):
-        """
-        Load the neural activity from the file
+    def get_activity_unit_id(
+        self, filename: str, config: DatasetConfig,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Load a processed Ahrens subject without changing its identity.
+
+        Parameters
+        ----------
+        filename : str
+            Absolute path to ``subject_<id>.npz``.
+        config : DatasetConfig
+            Split and component settings.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Activity ``(units, time)`` and unit types ``(units,)``.
         """
         with np.load(filename) as data:
             require_train_validation_fit(data, filename, config)
-            assert config.fc_dim is None, 'Only support using PC for Ahrens data'
+            expected_subject = os.path.splitext(
+                os.path.basename(filename)
+            )[0]
+            if ('source_subject' not in data or
+                    data['source_subject'].item() != expected_subject):
+                raise ValueError(
+                    f'Archive subject does not match filename: {filename}'
+                )
+            if config.fc_dim is not None:
+                raise ValueError('Ahrens data do not support FC units.')
             if config.pc_dim is None:
-                activity: np.ndarray = data['M']
-                unit_type = np.zeros((activity.shape[0], ))
+                activity = data['M']
+                unit_type = np.zeros(activity.shape[0], dtype=int)
             else:
-                assert config.brain_regions == 'all', 'Only support using all brain regions when using PC'
-                activity: np.ndarray = data['PC'][: config.pc_dim]
+                if config.brain_regions != 'all':
+                    raise ValueError(
+                        'Ahrens PC data require all brain regions.'
+                    )
+                activity = data['PC'][:config.pc_dim]
                 unit_type = np.arange(activity.shape[0])
-        return activity, unit_type.astype(int)
+        return activity, unit_type
 
-    def load_all_activities(self, config: DatasetConfig):
-        all_activities = []
-        all_unit_types = []
-        n_sessions = 0
+    def load_all_activities(
+        self, config: DatasetConfig,
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """Load every selected named subject in stable numeric order.
 
-        data_dir = ZEBRAFISH_AHRENS_PROCESSED_DIR
-        if config.filter_type != 'none':
-            data_dir = data_dir + f'_{config.filter_type}'
+        Parameters
+        ----------
+        config : DatasetConfig
+            Filter condition and explicit subject names, if selected.
 
-        for i in range(N_ZEBRAFISH_AHNRENS_SESSIONS):
-            n_sessions += 1
-            if config.session_ids != None and n_sessions - 1 not in config.session_ids:
-                continue
-            if config.animal_ids != None and i not in config.animal_ids:
-                continue
+        Returns
+        -------
+        tuple[list[np.ndarray], list[np.ndarray]]
+            Neural arrays ``(units, time)`` and unit-type arrays.
+        """
+        available = processed_subject_names(config.filter_type)
+        selected = available if config.session_ids is None else list(
+            config.session_ids
+        )
+        missing = sorted(set(selected) - set(available))
+        if missing:
+            raise ValueError(
+                f'Ahrens subjects {missing} are missing from '
+                f'{processed_directory(config.filter_type)}.'
+            )
+        if not selected:
+            raise ValueError('No Ahrens subjects were selected.')
+        root = processed_directory(config.filter_type)
+        activities = []
+        unit_types = []
+        for name in selected:
+            filename = str(root / f'{name}.npz')
+            activity, unit_type = self.get_activity_unit_id(
+                filename, config
+            )
+            activities.append(activity)
+            unit_types.append(unit_type)
+        return activities, unit_types
 
-            filename = os.path.join(data_dir, f'{i}.npz')
-            all_activity, unit_type = self.get_activity_unit_id(filename, config)
-            all_activity = self.downsample(all_activity)
-            all_activities.append(all_activity)
-            all_unit_types.append(unit_type)
-
-        return all_activities, all_unit_types
-    
 class Celegans(NeuralDataset):
 
     data_dir = CELEGANS_PROCESSED_DIR
@@ -548,7 +588,6 @@ class Celegans(NeuralDataset):
             filename = os.path.join(data_dir, f'{idx}.npz')
 
             all_activity, unit_type = self.get_activity_unit_id(filename, config)
-            all_activity = self.downsample(all_activity)
             all_activities.append(all_activity)
             all_unit_types.append(unit_type)
 
@@ -597,7 +636,6 @@ class Mice(Celegans):
 
                 filename = os.path.join(data_dir, f'{mouse}_{session}.npz')
                 activity, unit_type = self.get_activity_unit_id(filename, config)
-                activity = self.downsample(activity)
                 all_activities.append(activity)
                 all_unit_types.append(unit_type)
         
@@ -636,7 +674,6 @@ class Simulation(NeuralDataset):
             else:
                 activity: np.ndarray = data['PC'][: config.pc_dim]
             
-            activity = self.downsample(activity)
             all_activities.append(activity)
 
             if config.pc_dim is None:

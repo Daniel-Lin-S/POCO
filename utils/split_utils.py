@@ -1,63 +1,80 @@
-"""Select time points used to fit recording preprocessing.
+"""Define one chronological train, validation, and test split.
 
-Input is a recording length and the patchwise train/validation fractions.
-Output is a Boolean mask over the recording's time axis. The mask includes
-train and validation samples and excludes test samples in every patch.
+Input is a recording length and 60/20/20 fractions. Output is the two
+exclusive boundaries and a mask covering train plus validation samples.
 """
 
 import numpy as np
 
 
-def train_validation_mask(
+def chronological_bounds(
     length: int,
-    patch_length: int,
     train_split: float,
     val_split: float,
-) -> np.ndarray:
-    """Return train and validation positions for one recording.
+    test_split: float,
+) -> tuple[int, int]:
+    """Return chronological split boundaries for one recording.
 
     Parameters
     ----------
     length : int
         Number of time samples in the recording.
-    patch_length : int
-        Nominal number of samples per patch.
     train_split : float
-        Fraction assigned to training within each patch.
+        Training fraction.
     val_split : float
-        Fraction assigned to validation within each patch.
+        Validation fraction.
+    test_split : float
+        Test fraction.
+
+    Returns
+    -------
+    tuple[int, int]
+        Exclusive train and validation endpoints.
+    """
+    if length < 3:
+        raise ValueError(f'Expected at least 3 samples, got {length}.')
+    fractions = (train_split, val_split, test_split)
+    if any(value <= 0 for value in fractions):
+        raise ValueError(f'Split fractions must be positive: {fractions}.')
+    if not np.isclose(sum(fractions), 1.0):
+        raise ValueError(f'Split fractions must sum to 1: {fractions}.')
+    train_end = int(length * train_split)
+    val_end = int(length * (train_split + val_split))
+    if not 0 < train_end < val_end < length:
+        raise ValueError(
+            f'Expected three nonempty splits for length {length}, '
+            f'got boundaries {train_end} and {val_end}.'
+        )
+    return train_end, val_end
+
+
+def train_validation_mask(
+    length: int,
+    train_split: float,
+    val_split: float,
+    test_split: float,
+) -> np.ndarray:
+    """Select training and validation samples, excluding test samples.
+
+    Parameters
+    ----------
+    length : int
+        Number of time samples in the recording.
+    train_split : float
+        Training fraction.
+    val_split : float
+        Validation fraction.
+    test_split : float
+        Test fraction.
 
     Returns
     -------
     np.ndarray
         Boolean mask with shape ``(length,)``.
-
-    Raises
-    ------
-    ValueError
-        If the split is invalid or contains no fit samples.
     """
-    if length <= 0 or patch_length <= 0:
-        raise ValueError(
-            f"Expected positive length and patch_length, got "
-            f"{length} and {patch_length}."
-        )
-    if not 0 < train_split < train_split + val_split < 1:
-        raise ValueError(
-            "Expected 0 < train_split < train_split + val_split < 1, "
-            f"got {train_split} and {val_split}."
-        )
-
+    _, val_end = chronological_bounds(
+        length, train_split, val_split, test_split
+    )
     mask = np.zeros(length, dtype=bool)
-    segments = max(1, length // patch_length)
-    for patch in range(segments):
-        start = patch * patch_length
-        end = (patch + 1) * patch_length
-        if patch == segments - 1:
-            end = length
-        fit_end = start + int((end - start) * (train_split + val_split))
-        mask[start:fit_end] = True
-
-    if not mask.any():
-        raise ValueError("No train or validation samples available for fit.")
+    mask[:val_end] = True
     return mask
