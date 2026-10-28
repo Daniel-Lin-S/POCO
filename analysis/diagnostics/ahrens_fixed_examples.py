@@ -10,17 +10,22 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from textwrap import fill
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
 
 from analysis.session_scaling_extended import subject_errors
+from analysis.diagnostics.figure_style import (
+    LABEL_FONT, PANEL_FONT, TICK_FONT, SESSION_COLORS,
+    SESSION_WIDTHS, save_diagnostic,
+)
 from configs.config_global import (
     ARTIFACT_ROOT, DEVICE,
 )
@@ -34,7 +39,8 @@ SUBJECTS = ("subject_8", "subject_09", "subject_11")
 SIZES = (3, 9, 18)
 PCS = (0, 20, 50)
 SEED = 0
-COLORS = ("#d1495b", "#306e9a", "#6b9d45")
+CONTEXT_FRAMES = 8
+CONTEXT_COLOR = "#e8e8e8"
 MLP_LAYERS = (
     "in_proj.0",
     "conditioning_alpha",
@@ -42,7 +48,6 @@ MLP_LAYERS = (
     "out_proj",
 )
 PARAMETER_KINDS = ("weight", "bias")
-LINE_STYLES = {3: ":", 9: "--", 18: "-"}
 WEIGHT_VIEW_QUANTILES = (0.005, 0.995)
 
 
@@ -146,50 +151,71 @@ def prediction_figure(
     predictions: dict[int, dict[str, np.ndarray]],
     path: Path,
 ) -> None:
-    """Plot identical test targets beside three checkpoint predictions."""
-    fig, axes = plt.subplots(3, 3, figsize=(17, 13))
+    """Plot the last eight observed frames and all matched forecast frames.
+
+    Parameters
+    ----------
+    windows : dict[str, numpy.ndarray]
+        Reference subject to (context plus horizon, PCs) test window.
+    predictions : dict[int, dict[str, numpy.ndarray]]
+        Session count and subject to (horizon, PCs) predictions.
+    path : pathlib.Path
+        Absolute output PDF destination.
+    """
+    fig, axes = plt.subplots(3, 3, figsize=(14, 10.5))
     for row, subject in enumerate(SUBJECTS):
         for column, pc in enumerate(PCS):
             ax = axes[row, column]
             horizon = predictions[SIZES[0]][subject].shape[0]
-            target = windows[subject][-horizon:, pc]
-            ax.plot(
-                np.arange(target.size), target, color="#222222",
-                linewidth=2.8, marker="o", markersize=4,
-                markevery=3, label="Target",
+            window = windows[subject]
+            if window.shape[0] - horizon < CONTEXT_FRAMES:
+                raise ValueError(f"Insufficient context for {subject}.")
+            observed = window[-horizon - CONTEXT_FRAMES:, pc]
+            x = np.arange(-CONTEXT_FRAMES, horizon)
+            ax.axvspan(
+                -CONTEXT_FRAMES, -0.5, color=CONTEXT_COLOR, zorder=0,
             )
-            for size, color in zip(SIZES, COLORS):
+            ax.axvline(-0.5, color="#777777", linewidth=1.2, zorder=1)
+            ax.plot(
+                x, observed, color="#111111", linestyle="--",
+                linewidth=2.5, marker="o", markersize=5,
+                markerfacecolor="white", markeredgewidth=1.3,
+                markevery=2, label="Target", zorder=5,
+            )
+            for size in SIZES:
                 values = predictions[size][subject][:, pc]
                 ax.plot(
-                    np.arange(values.size), values, color=color,
-                    linewidth=2.4, label=f"{size} sessions",
-                    linestyle=LINE_STYLES[size],
+                    np.arange(horizon), values,
+                    color=SESSION_COLORS[size],
+                    linewidth=SESSION_WIDTHS[size], linestyle="-",
+                    label=f"{size} sessions", zorder=2,
                 )
-            ax.set_title(f"{subject}, PC {pc}", fontsize=17, pad=12)
-            ax.set_xlabel("Forecast step", fontsize=15)
-            ax.set_ylabel("PC activity", fontsize=15)
-            ax.tick_params(labelsize=13)
+            ax.set_title(
+                f"{subject} · PC {pc}", fontsize=PANEL_FONT, pad=9,
+            )
+            ax.set_xlim(-CONTEXT_FRAMES, horizon - 1)
+            ax.set_xticks((-CONTEXT_FRAMES, 0, 8, horizon - 1))
+            ax.yaxis.set_major_locator(MaxNLocator(3))
+            ax.set_xlabel("Relative frame", fontsize=LABEL_FONT)
+            ax.set_ylabel("PC activity", fontsize=LABEL_FONT)
+            ax.tick_params(labelsize=TICK_FONT)
             sns.despine(ax=ax)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="lower center",
-        bbox_to_anchor=(0.5, 0.005), ncol=4,
-        frameon=False, fontsize=16,
+    handles.append(Patch(facecolor=CONTEXT_COLOR))
+    labels.append("Context (8 frames)")
+    save_diagnostic(
+        fig, path,
+        "POCO | 3, 9, 18 training sessions | seed 0\n"
+        "Best 9-session test score; forecast begins at frame 0",
+        handles, labels,
     )
-    fig.suptitle(fill(
-        "POCO on identical Ahrens test windows; seed 0; "
-        "best-scoring nine-session group shown", 75,
-    ), y=0.995, fontsize=20)
-    fig.tight_layout(rect=(0, 0.075, 1, 0.95))
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
 
 
 def training_figure(paths: dict[int, Path], path: Path) -> None:
     """Plot saved pooled-group training and validation MSE histories."""
-    fig, axes = plt.subplots(2, 1, figsize=(11, 9))
+    fig, axes = plt.subplots(2, 1, figsize=(10.5, 8))
     max_update = 0.0
-    for size, color in zip(SIZES, COLORS):
+    for size in SIZES:
         table = pd.read_table(paths[size] / "progress.txt")
         if table.empty:
             raise ValueError(f"Empty progress table in {paths[size]}.")
@@ -200,32 +226,26 @@ def training_figure(paths: dict[int, Path], path: Path) -> None:
             if not np.isfinite(x).all() or not np.isfinite(values).all():
                 raise ValueError(f"Non-finite {field} in {paths[size]}.")
             sns.lineplot(
-                x=x, y=values, ax=ax, color=color,
-                linewidth=2.5, label=f"{size} sessions",
-                estimator=None,
+                x=x, y=values, ax=ax, color=SESSION_COLORS[size],
+                linewidth=SESSION_WIDTHS[size], linestyle="-",
+                label=f"{size} sessions", estimator=None,
             )
     for ax, label in zip(
         axes, ("Training loss (MSE)", "Validation loss (MSE)")
     ):
-        ax.set_ylabel(label, fontsize=16)
+        ax.set_ylabel(label, fontsize=LABEL_FONT)
         ax.set_xlim(0, max_update)
-        ax.tick_params(labelsize=13)
+        ax.tick_params(labelsize=TICK_FONT)
         ax.legend().remove()
         sns.despine(ax=ax)
-    axes[1].set_xlabel("Training update", fontsize=16)
+    axes[1].set_xlabel("Training update", fontsize=LABEL_FONT)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="lower center",
-        bbox_to_anchor=(0.5, 0.01), ncol=3,
-        frameon=False, fontsize=15,
+    save_diagnostic(
+        fig, path,
+        "POCO loss histories | seed 0\n"
+        "Each curve uses its full training / validation group",
+        handles, labels,
     )
-    fig.suptitle(fill(
-        "POCO pooled-group loss histories; validation "
-        "population differs by group size", 75,
-    ), y=0.99, fontsize=19)
-    fig.tight_layout(rect=(0, 0.09, 1, 0.95))
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
 
 
 def weights_figure(paths: dict[int, Path], path: Path) -> None:
@@ -264,7 +284,7 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
                     f"{key} in {fit_path}."
                 )
             parameters[size][key] = values
-    fig, axes = plt.subplots(4, 2, figsize=(15, 16))
+    fig, axes = plt.subplots(4, 2, figsize=(13.5, 14))
     for row, layer in enumerate(MLP_LAYERS):
         for column, kind in enumerate(PARAMETER_KINDS):
             key = f"{layer}.{kind}"
@@ -275,10 +295,11 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
                     f"Parameter count differs across fits for {key}: "
                     f"{sorted(counts)}."
                 )
-            for size, color in zip(SIZES, COLORS):
+            for size in SIZES:
                 sns.ecdfplot(
-                    x=parameters[size][key], ax=ax, color=color,
-                    linewidth=2.5, linestyle=LINE_STYLES[size],
+                    x=parameters[size][key], ax=ax,
+                    color=SESSION_COLORS[size],
+                    linewidth=SESSION_WIDTHS[size], linestyle="-",
                     label=f"{size} sessions",
                 )
             pooled = np.concatenate([
@@ -295,31 +316,27 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
             ax.set_xlim(lower - padding, upper + padding)
             ax.axvline(0, color="#333333", linewidth=1, alpha=0.45)
             ax.set_title(
-                f"{key} (n={next(iter(counts)):,})",
-                fontsize=16, pad=12,
+                f"{key}\n{next(iter(counts)):,} parameters",
+                fontsize=PANEL_FONT, pad=9,
             )
             ax.set_xlabel(
-                "Signed parameter value (central 99%)",
-                fontsize=14,
+                "Signed parameter value",
+                fontsize=LABEL_FONT,
             )
-            ax.set_ylabel("Cumulative fraction", fontsize=14)
+            ax.set_ylabel("Cumulative fraction", fontsize=LABEL_FONT)
             ax.set_ylim(0, 1)
-            ax.tick_params(labelsize=12)
+            ax.tick_params(labelsize=TICK_FONT)
+            ax.xaxis.set_major_locator(MaxNLocator(4))
+            ax.yaxis.set_major_locator(MaxNLocator(3))
             ax.legend().remove()
             sns.despine(ax=ax)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="lower center",
-        bbox_to_anchor=(0.5, 0.005), ncol=3,
-        frameon=False, fontsize=16,
+    save_diagnostic(
+        fig, path,
+        "POCO shared local MLP parameter distributions | seed 0\n"
+        "Empirical cumulative distributions; central 99% shown",
+        handles, labels,
     )
-    fig.suptitle(fill(
-        "POCO shared local MLP parameter distributions; "
-        "selected checkpoints, seed 0", 75,
-    ), y=0.995, fontsize=20)
-    fig.tight_layout(rect=(0, 0.06, 1, 0.965))
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
 
 
 def subject_loss_figure(table: pd.DataFrame, path: Path) -> None:
@@ -354,7 +371,7 @@ def subject_loss_figure(table: pd.DataFrame, path: Path) -> None:
         raise ValueError("Expected two seed means for every subject/size.")
     if not np.isfinite(summary[["mean", "std"]]).all().all():
         raise ValueError("Non-finite per-subject test MSE summary.")
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.8))
     for ax, subject in zip(axes, SUBJECTS):
         selected = summary.loc[summary.subject == subject]
         selected = selected.sort_values("size")
@@ -368,18 +385,16 @@ def subject_loss_figure(table: pd.DataFrame, path: Path) -> None:
         )
         ax.set_xticks((3, 6, 9, 18))
         ax.set_xlim(2, 19)
-        ax.set_title(subject, fontsize=17, pad=12)
-        ax.set_xlabel("Training sessions", fontsize=15)
-        ax.set_ylabel("Test loss (MSE)", fontsize=15)
-        ax.tick_params(labelsize=13)
+        ax.set_title(subject, fontsize=PANEL_FONT, pad=9)
+        ax.set_xlabel("Training sessions", fontsize=LABEL_FONT)
+        ax.set_ylabel("Test loss (MSE)", fontsize=LABEL_FONT)
+        ax.tick_params(labelsize=TICK_FONT)
         sns.despine(ax=ax)
-    fig.suptitle(fill(
-        "POCO fixed-subject test loss; groups averaged within seed; "
-        "error bars are SEM across two seeds", 75,
-    ), y=0.99, fontsize=19)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
+    save_diagnostic(
+        fig, path,
+        "POCO test loss on the fixed reference subjects\n"
+        "Groups averaged within seed; error bars: SEM across two seeds",
+    )
 
 
 def main() -> None:
@@ -463,13 +478,20 @@ def main() -> None:
             for pending in pending_figures.values():
                 pending.unlink(missing_ok=True)
         previous["prediction_line_styles"] = {
-            "3": "dotted", "9": "dashed", "18": "solid"
+            "3": "solid", "9": "solid", "18": "solid"
         }
         previous["weight_distribution"] = (
             "Signed ECDF by shared local MLP layer, "
             "separate weights and biases; ECDF uses all values; "
             "x axis shows pooled central 99 percent"
         )
+        previous["displayed_context_frames"] = CONTEXT_FRAMES
+        previous["prediction_colors"] = SESSION_COLORS
+        previous["prediction_widths_points"] = SESSION_WIDTHS
+        previous["target_style"] = "black dashed with open circles"
+        previous["layout"] = {
+            "title_gap_points": 16, "minimum_font_points": 18,
+        }
         metadata_pending = output / ".manifest.pending.json"
         with metadata_pending.open("x") as stream:
             json.dump(previous, stream, indent=2)
@@ -491,6 +513,11 @@ def main() -> None:
         "reference_subjects": SUBJECTS,
         "pc_indices": PCS,
         "test_window_offset": 0,
+        "displayed_context_frames": CONTEXT_FRAMES,
+        "prediction_colors": SESSION_COLORS,
+        "prediction_widths_points": SESSION_WIDTHS,
+        "target_style": "black dashed with open circles",
+        "layout": {"title_gap_points": 16, "minimum_font_points": 18},
         "fit_ids_by_session_count": selected,
         "nine_session_selection":
             "maximum fixed-reference test score",
@@ -499,7 +526,7 @@ def main() -> None:
         "subject_test_loss":
             "mean groups within seed, then SEM across two seeds",
         "prediction_line_styles": {
-            "3": "dotted", "9": "dashed", "18": "solid"
+            "3": "solid", "9": "solid", "18": "solid"
         },
         "weight_distribution": (
             "Signed ECDF by shared local MLP layer, "
