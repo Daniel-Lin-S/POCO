@@ -711,6 +711,15 @@ def ahrens_session_lowpass_extended_analysis() -> None:
     analyze_ahrens_session_extended()
 
 
+def ahrens_single_subject_reference_analysis() -> None:
+    """Refresh the saved fixed-cohort comparison with singleton fits."""
+    from analysis.single_session_reference import (
+        add_singleton_reference,
+    )
+
+    add_singleton_reference()
+
+
 def ahrens_head_sharing_factorial_analysis() -> None:
     """Save the complete fixed-reference POCO sharing report."""
     from analysis.ahrens_head_sharing import (

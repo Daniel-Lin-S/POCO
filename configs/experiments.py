@@ -799,6 +799,37 @@ def ahrens_session_lowpass_fixed_priority() -> dict:
 
 
 
+def ahrens_single_subject_reference() -> dict:
+    """Select completed singleton controls for the fixed Ahrens cohort.
+
+    Returns
+    -------
+    dict
+        POCO and NLinear singleton fits for subjects 8, 09, and 11,
+        grouped by seed with their original scientific identities.
+    """
+    settings = load_ahrens_session_extended_campaign()
+    reference = set(settings['reference_subjects'])
+    selected = {}
+    expected_per_seed = len(reference) * len(settings['models'])
+    for seed, configs in ahrens_session_lowpass_extended().items():
+        selected[seed] = [
+            config for config in configs
+            if len(config.dataset_config[
+                config.dataset_label[0]
+            ].session_ids) == 1
+            and config.dataset_config[
+                config.dataset_label[0]
+            ].session_ids[0] in reference
+        ]
+        if len(selected[seed]) != expected_per_seed:
+            raise ValueError(
+                f'Expected {expected_per_seed} singleton controls '
+                f'for seed {seed}, got {len(selected[seed])}.'
+            )
+    return selected
+
+
 def ahrens_head_sharing_factorial() -> dict:
     """Resolve the nested full-factorial POCO sharing campaign.
 
