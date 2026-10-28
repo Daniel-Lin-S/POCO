@@ -30,6 +30,7 @@ SESSION_WIDTHS = {3: 2.4, 9: 3.2, 18: 4.0}
 def save_diagnostic(
     figure: Figure, path: Path, title: str,
     handles: list | None = None, labels: list[str] | None = None,
+    legend_columns: int | None = None,
 ) -> None:
     """Save a figure with measured title and legend clearance.
 
@@ -45,11 +46,17 @@ def save_diagnostic(
         Legend artists, default None for no legend.
     labels : list[str] or None, optional
         Corresponding labels, default None for no legend.
+    legend_columns : int or None, optional
+        Number of legend columns, default None for one row.
     """
     if not path.is_absolute():
         raise ValueError(f"Expected an absolute figure path: {path}.")
     if (handles is None) != (labels is None):
         raise ValueError("Legend handles and labels must be supplied together.")
+    if legend_columns is not None and legend_columns < 1:
+        raise ValueError(
+            f"Expected positive legend columns, got {legend_columns}."
+        )
     for text in figure.findobj(Text):
         if text.get_fontsize() < TICK_FONT:
             text.set_fontsize(TICK_FONT)
@@ -75,7 +82,8 @@ def save_diagnostic(
         legend = figure.legend(
             handles, labels, loc="upper center",
             bbox_to_anchor=(center, legend_top / figure.bbox.height),
-            ncol=len(labels), frameon=False, fontsize=LEGEND_FONT,
+            ncol=legend_columns or len(labels),
+            frameon=False, fontsize=LEGEND_FONT,
             borderaxespad=0, borderpad=0, columnspacing=1,
             handlelength=2.2,
         )

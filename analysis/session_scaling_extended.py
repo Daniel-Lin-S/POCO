@@ -31,6 +31,50 @@ BASELINE_FIT_COUNT = 4
 METRICS = ('test_score', 'test_loss', 'val_score', 'val_loss')
 
 
+def require_matching_subject_protocol(
+    first: NeuralPredictionConfig,
+    second: NeuralPredictionConfig,
+    subject: str,
+) -> None:
+    """Require the same preprocessing and chronological windows.
+
+    Parameters
+    ----------
+    first : NeuralPredictionConfig
+        First fit containing the requested subject.
+    second : NeuralPredictionConfig
+        Second fit containing the requested subject.
+    subject : str
+        Recording name whose split and evaluation setup must match.
+    """
+    protocols = []
+    for config in (first, second):
+        if len(config.dataset_label) != 1:
+            raise ValueError(
+                f'Expected one dataset label for {subject}, '
+                f'got {config.dataset_label}.'
+            )
+        dataset = config.dataset_config[
+            config.dataset_label[0]
+        ].to_dict()
+        if subject not in dataset['session_ids']:
+            raise ValueError(
+                f'{subject} absent from {config.save_path}.'
+            )
+        dataset.pop('session_ids')
+        protocols.append((
+            dataset, config.dataset_filter,
+            config.split_protocol, config.seq_length,
+            config.pred_length,
+        ))
+    if protocols[0] != protocols[1]:
+        raise ValueError(
+            f'Split or preprocessing protocol differs for '
+            f'{subject} between {first.save_path} '
+            f'and {second.save_path}.'
+        )
+
+
 def subject_errors(
     config: NeuralPredictionConfig, phase: str,
 ) -> dict[str, tuple[float, float]]:
