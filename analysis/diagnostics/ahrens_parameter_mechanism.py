@@ -1,7 +1,19 @@
 """Compare POCO head distributions and fixed-subject output components.
 
-Read the completed fixed-reference CSV, fit checkpoints, and processed test
-segments. Write distribution and component CSV/PDF diagnostics in place.
+Input: fixed_reference_per_fit.csv, completed fit checkpoints, and processed
+low-pass subject archives. The fixed reference consists of subjects 8, 09,
+and 11 with their chronological test windows.
+
+Output in an existing diagnostics directory:
+- parameter_distribution_shift.csv: fit_id, seed, sessions_per_fit,
+  parameter, parameter_count, normalized Wasserstein distance, RMS ratio.
+- parameter_distribution_summary.csv: two-seed mean, SD, and count for
+  each parameter and session count after groups are averaged within seed.
+- forecast_component_impact.csv: subject, training_sessions, component,
+  test_elements, both MSEs, their change, allocated change, and RMS term
+  change for the displayed seed-zero fits.
+- parameter_distribution_shift.pdf and forecast_component_impact.pdf:
+  readable figures derived from the tables.
 Completed fit artifacts are read only.
 """
 
@@ -35,10 +47,16 @@ from utils.config_utils import load_config
 from utils.split_utils import chronological_bounds
 
 SIZES = (3, 9, 18)
-TERMS = ("input_scaled", "embedding_beta", "beta_bias", "output_bias")
-TERM_LABELS = ("Input × scale", "Embedding β", "Wₒ bβ", "bₒ")
+TERMS = (
+    "scale_embedding", "scale_bias", "embedding_beta",
+    "beta_bias", "output_bias",
+)
+TERM_LABELS = (
+    "Input × Wαe", "Input × bα", "Embedding β",
+    "Wₒ bβ", "bₒ",
+)
 BATCH_SIZE = 32
-RECONSTRUCTION_TOLERANCE = 0.001
+RECONSTRUCTION_TOLERANCE = 0.002
 MSE_TOLERANCE = 0.002
 
 
@@ -242,6 +260,53 @@ def distribution_figure(
     )
 
 
+def load_checkpoint(
+    fit_id: str, device: torch.device,
+) -> tuple[object, object, object]:
+    """Load a complete POCO checkpoint for fixed-subject evaluation.
+
+    Parameters
+    ----------
+    fit_id : str
+        Scientific fit hash.
+    device : torch.device
+        Evaluation device.
+
+    Returns
+    -------
+    tuple[object, object, object]
+        Eval-mode model, saved fit config, and dataset config.
+    """
+    path, config = complete_fit(fit_id)
+    item = config.dataset_config[config.dataset_label[0]]
+    if (
+        config.conditioning != "mlp" or config.normalize_input or
+        config.mu_module_mode != "none" or
+        config.std_module_mode != "none"
+    ):
+        raise ValueError(f"Unexpected output normalization in {path}.")
+    if item.test_set_window_stride != 1:
+        raise ValueError(f"Expected test stride one in {path}.")
+    if not set(SUBJECTS).issubset(item.session_ids):
+        raise ValueError(f"Missing fixed subjects in {path}.")
+    units = item.pc_dim
+    model = model_init(
+        config, [[units] * len(item.session_ids)],
+        [[np.arange(units) for _ in item.session_ids]],
+    )
+    model.to(device)
+    model.unit_types = [
+        unit_type.to(device) for unit_type in model.unit_types
+    ]
+    state = torch.load(
+        path / "net_best.pth", map_location=device,
+        weights_only=True,
+    )
+    model.load_state_dict(state)
+    model.eval()
+    return model, config, item
+
+
 def load_models(
     selected: dict[int, str], device: torch.device,
 ) -> tuple[dict[int, tuple[object, object]], object]:
@@ -263,33 +328,11 @@ def load_models(
     settings = set()
     dataset = None
     for size in SIZES:
-        path, config = complete_fit(selected[size])
-        item = config.dataset_config[config.dataset_label[0]]
-        if (
-            config.conditioning != "mlp" or config.normalize_input or
-            config.mu_module_mode != "none" or
-            config.std_module_mode != "none"
-        ):
-            raise ValueError(f"Unexpected output normalization in {path}.")
-        if item.test_set_window_stride != 1:
-            raise ValueError(f"Expected test stride one in {path}.")
-        if not set(SUBJECTS).issubset(item.session_ids):
-            raise ValueError(f"Missing fixed subjects in {path}.")
+        model, config, item = load_checkpoint(selected[size], device)
         settings.add((
             item.pc_dim, item.seq_length, item.pred_length,
             item.train_split, item.val_split, item.test_split,
         ))
-        units = item.pc_dim
-        model = model_init(
-            config, [[units] * len(item.session_ids)],
-            [[np.arange(units) for _ in item.session_ids]],
-        )
-        state = torch.load(
-            path / "net_best.pth", map_location=device,
-            weights_only=True,
-        )
-        model.load_state_dict(state)
-        model.eval()
         models[size] = model, config
         dataset = item
     if len(settings) != 1:
@@ -329,11 +372,12 @@ def test_segment(subject: str, dataset: object) -> np.ndarray:
     return result
 
 
+@torch.no_grad()
 def decompose(
     model: object, config: object, subject: str,
     history: torch.Tensor, device: torch.device,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Split one POCO forecast into four output-space terms.
+    """Split one POCO forecast into five output-space terms.
 
     Parameters
     ----------
@@ -388,9 +432,13 @@ def decompose(
     beta = cache["conditioning_beta"][index]
     weight = model.out_proj.weight
     beta_bias = model.conditioning_beta.bias
+    alpha_bias = model.conditioning_alpha.bias
     terms = {
-        "input_scaled": functional.linear(
-            hidden * alpha, weight,
+        "scale_embedding": functional.linear(
+            hidden * (alpha - alpha_bias), weight,
+        ),
+        "scale_bias": functional.linear(
+            hidden * alpha_bias, weight,
         ),
         "embedding_beta": functional.linear(
             beta - beta_bias, weight,
@@ -551,7 +599,7 @@ def component_results(
 
 
 def component_figure(table: pd.DataFrame, path: Path) -> None:
-    """Plot four output-component contributions to fixed-test MSE change.
+    """Plot five output-component contributions to fixed-test MSE change.
 
     Parameters
     ----------
@@ -579,7 +627,7 @@ def component_figure(table: pd.DataFrame, path: Path) -> None:
             label=f"{size} versus 3 sessions",
         )
         biases = np.array((
-            impacts[2], impacts[3], impacts[2] + impacts[3],
+            impacts[3], impacts[4], impacts[3] + impacts[4],
         ))
         bias_values.extend(biases)
         axes[1].bar(
@@ -692,7 +740,7 @@ def main() -> None:
     )
     manifest["component_analysis"] = (
         "All fixed-subject test windows for selected seed-zero fits. "
-        "Four additive output terms. MSE-change allocation is algebraic "
+        "Five additive output terms. MSE-change allocation is algebraic "
         "and does not establish causal parameter effects."
     )
     pending = output / ".parameter_manifest.pending.json"
