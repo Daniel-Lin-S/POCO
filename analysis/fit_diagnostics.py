@@ -27,6 +27,7 @@ from configs.configs import NeuralPredictionConfig
 from configs.experiments import (
     ahrens_length_lowpass_four, ahrens_session_lowpass_six,
     ahrens_session_lowpass_extended,
+    ahrens_head_sharing_factorial,
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
@@ -47,6 +48,9 @@ CAMPAIGN_FACTORIES = {
     'ahrens_session_lowpass_six': ahrens_session_lowpass_six,
     'ahrens_session_lowpass_extended': (
         ahrens_session_lowpass_extended
+    ),
+    'ahrens_head_sharing_factorial': (
+        ahrens_head_sharing_factorial
     ),
 }
 
@@ -79,6 +83,12 @@ def fit_title(config: NeuralPredictionConfig) -> str:
     else:
         cohort = label
         dataset_name = 'Neural data'
+    if config.experiment_name == 'ahrens_head_sharing_factorial':
+        if not label.startswith('zebrafishahrens_pc-'):
+            raise ValueError(
+                f'Expected Ahrens subject group, got {label}.'
+            )
+        cohort = f'{len(subjects)} subjects; reference 8, 09, 11'
     dataset = config.dataset_config[label]
     condition = str(config.dataset_filter).replace('lowpass', 'low-pass')
     details = [dataset_name]
@@ -95,9 +105,19 @@ def fit_title(config: NeuralPredictionConfig) -> str:
             f'{train_frames} train frames '
             f'(nominal {nominal})'
         )
+    policy = ''
+    if config.experiment_name == 'ahrens_head_sharing_factorial':
+        names = (
+            ('W_o', config.out_weight_scope),
+            ('input', config.in_proj_scope),
+            ('W_alpha', config.alpha_weight_scope),
+        )
+        policy = ' | ' + ', '.join(
+            f'{name} {scope}' for name, scope in names
+        )
     return (
         f'{config.model_label} | {" ".join(details)} | '
-        f'{cohort} | {exposure} | '
+        f'{cohort} | {exposure}{policy} | '
         f'seed {config.seed}'
     )
 

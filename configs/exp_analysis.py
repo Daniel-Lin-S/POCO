@@ -711,6 +711,15 @@ def ahrens_session_lowpass_extended_analysis() -> None:
     analyze_ahrens_session_extended()
 
 
+def ahrens_head_sharing_factorial_analysis() -> None:
+    """Save the complete fixed-reference POCO sharing report."""
+    from analysis.ahrens_head_sharing import (
+        analyze_ahrens_head_sharing_factorial,
+    )
+
+    analyze_ahrens_head_sharing_factorial()
+
+
 def ahrens_session_lowpass_six_analysis() -> None:
     """Save the six-subject session-scaling summary."""
     from analysis.session_scaling import analyze_ahrens_sessions
