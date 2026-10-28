@@ -1,12 +1,13 @@
 """Render matched POCO Ahrens test traces and diagnostic figures.
 
 Input is a completed fixed-reference report with fixed_reference_per_fit.csv.
-Output is a new diagnostics/<UTC timestamp> folder with three PDFs and a
+Output is a diagnostics/<UTC timestamp> folder with four PDFs and a
 manifest. Fit checkpoints and scientific results remain read only.
 """
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import fill
@@ -34,12 +35,15 @@ SIZES = (3, 9, 18)
 PCS = (0, 20, 50)
 SEED = 0
 COLORS = ("#d1495b", "#306e9a", "#6b9d45")
-WEIGHT_KEYS = (
-    "in_proj.0.weight",
-    "conditioning_alpha.weight",
-    "conditioning_beta.weight",
-    "out_proj.weight",
+MLP_LAYERS = (
+    "in_proj.0",
+    "conditioning_alpha",
+    "conditioning_beta",
+    "out_proj",
 )
+PARAMETER_KINDS = ("weight", "bias")
+LINE_STYLES = {3: ":", 9: "--", 18: "-"}
+WEIGHT_VIEW_QUANTILES = (0.005, 0.995)
 
 
 def selected_fits(table: pd.DataFrame) -> dict[int, str]:
@@ -151,14 +155,15 @@ def prediction_figure(
             target = windows[subject][-horizon:, pc]
             ax.plot(
                 np.arange(target.size), target, color="#222222",
-                linewidth=2.8, label="Target",
+                linewidth=2.8, marker="o", markersize=4,
+                markevery=3, label="Target",
             )
             for size, color in zip(SIZES, COLORS):
                 values = predictions[size][subject][:, pc]
                 ax.plot(
                     np.arange(values.size), values, color=color,
                     linewidth=2.4, label=f"{size} sessions",
-                    linestyle="--" if size == 9 else "-",
+                    linestyle=LINE_STYLES[size],
                 )
             ax.set_title(f"{subject}, PC {pc}", fontsize=17, pad=12)
             ax.set_xlabel("Forecast step", fontsize=15)
@@ -224,62 +229,95 @@ def training_figure(paths: dict[int, Path], path: Path) -> None:
 
 
 def weights_figure(paths: dict[int, Path], path: Path) -> None:
-    """Plot RMS and magnitudes of shared local MLP checkpoint weights."""
-    weights = {}
+    """Plot signed ECDFs of shared local MLP weights and biases.
+
+    Parameters
+    ----------
+    paths : dict[int, pathlib.Path]
+        Session count to completed POCO fit directory.
+    path : pathlib.Path
+        Absolute output PDF path.
+    """
+    keys = tuple(
+        f"{layer}.{kind}"
+        for layer in MLP_LAYERS
+        for kind in PARAMETER_KINDS
+    )
+    parameters = {}
     for size, fit_path in paths.items():
         state = torch.load(
             fit_path / "net_best.pth", map_location="cpu",
             weights_only=True,
         )
-        missing = set(WEIGHT_KEYS) - set(state)
+        missing = set(keys) - set(state)
         if missing:
             raise ValueError(
-                f"Missing shared MLP weights {sorted(missing)} "
+                f"Missing shared MLP parameters {sorted(missing)} "
                 f"in {fit_path}."
             )
-        weights[size] = {
-            key: state[key].float().numpy() for key in WEIGHT_KEYS
-        }
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    positions = np.arange(len(WEIGHT_KEYS))
-    width = 0.24
-    for offset, (size, color) in enumerate(zip(SIZES, COLORS)):
-        rms = [
-            float(np.sqrt(np.mean(weights[size][key] ** 2)))
-            for key in WEIGHT_KEYS
-        ]
-        if not np.isfinite(rms).all():
-            raise ValueError(f"Non-finite checkpoint weights at {size}.")
-        axes[0].bar(
-            positions + (offset - 1) * width, rms,
-            width=width, color=color, label=f"{size} sessions",
-        )
-        values = np.abs(weights[size][WEIGHT_KEYS[0]].ravel())
-        sns.kdeplot(
-            x=values, ax=axes[1], color=color,
-            linewidth=2.5, label=f"{size} sessions",
-        )
-    axes[0].set_xticks(positions, [
-        key.removesuffix(".weight") for key in WEIGHT_KEYS
-    ], rotation=15, ha="right")
-    axes[0].set_ylabel("Weight RMS", fontsize=16)
-    axes[1].set_xlabel("|in_proj.0.weight|", fontsize=16)
-    axes[1].set_ylabel("Density", fontsize=16)
-    for ax in axes:
-        ax.tick_params(labelsize=13)
-        ax.legend().remove()
-        sns.despine(ax=ax)
-    handles, labels = axes[0].get_legend_handles_labels()
+        parameters[size] = {}
+        for key in keys:
+            values = state[key].float().numpy().ravel()
+            if values.size < 2 or not np.isfinite(values).all():
+                raise ValueError(
+                    f"Expected at least two finite values for "
+                    f"{key} in {fit_path}."
+                )
+            parameters[size][key] = values
+    fig, axes = plt.subplots(4, 2, figsize=(15, 16))
+    for row, layer in enumerate(MLP_LAYERS):
+        for column, kind in enumerate(PARAMETER_KINDS):
+            key = f"{layer}.{kind}"
+            ax = axes[row, column]
+            counts = {parameters[size][key].size for size in SIZES}
+            if len(counts) != 1:
+                raise ValueError(
+                    f"Parameter count differs across fits for {key}: "
+                    f"{sorted(counts)}."
+                )
+            for size, color in zip(SIZES, COLORS):
+                sns.ecdfplot(
+                    x=parameters[size][key], ax=ax, color=color,
+                    linewidth=2.5, linestyle=LINE_STYLES[size],
+                    label=f"{size} sessions",
+                )
+            pooled = np.concatenate([
+                parameters[size][key] for size in SIZES
+            ])
+            lower, upper = np.quantile(
+                pooled, WEIGHT_VIEW_QUANTILES
+            )
+            if not np.isfinite((lower, upper)).all() or lower >= upper:
+                raise ValueError(
+                    f"No finite parameter range for {key}."
+                )
+            padding = (upper - lower) * 0.04
+            ax.set_xlim(lower - padding, upper + padding)
+            ax.axvline(0, color="#333333", linewidth=1, alpha=0.45)
+            ax.set_title(
+                f"{key} (n={next(iter(counts)):,})",
+                fontsize=16, pad=12,
+            )
+            ax.set_xlabel(
+                "Signed parameter value (central 99%)",
+                fontsize=14,
+            )
+            ax.set_ylabel("Cumulative fraction", fontsize=14)
+            ax.set_ylim(0, 1)
+            ax.tick_params(labelsize=12)
+            ax.legend().remove()
+            sns.despine(ax=ax)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(
         handles, labels, loc="lower center",
-        bbox_to_anchor=(0.5, 0.01), ncol=3,
-        frameon=False, fontsize=15,
+        bbox_to_anchor=(0.5, 0.005), ncol=3,
+        frameon=False, fontsize=16,
     )
     fig.suptitle(fill(
-        "POCO shared local MLP checkpoint weight magnitudes; seed 0",
-        75,
-    ), y=0.99, fontsize=19)
-    fig.tight_layout(rect=(0, 0.1, 1, 0.91))
+        "POCO shared local MLP parameter distributions; "
+        "selected checkpoints, seed 0", 75,
+    ), y=0.995, fontsize=20)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.94))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -348,7 +386,9 @@ def main() -> None:
     """Generate figures from the completed fixed-reference report."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-root", type=Path, required=True)
-    root = parser.parse_args().report_root.resolve()
+    parser.add_argument("--replace-dir", type=Path)
+    args = parser.parse_args()
+    root = args.report_root.resolve()
     if not root.is_dir():
         raise ValueError(f"Missing fixed-reference report: {root}.")
     table = pd.read_csv(root / "fixed_reference_per_fit.csv")
@@ -381,6 +421,46 @@ def main() -> None:
         size: predict(fit_path, windows)
         for size, fit_path in paths.items()
     }
+    if args.replace_dir is not None:
+        output = args.replace_dir.resolve()
+        if output.parent != root / "diagnostics":
+            raise ValueError(
+                f"Replacement directory must be under {root}."
+            )
+        with (output / "manifest.json").open() as stream:
+            previous = json.load(stream)
+        expected = {str(size): fit_id for size, fit_id in selected.items()}
+        if previous.get("fit_ids_by_session_count") != expected:
+            raise ValueError(
+                f"Selected fit IDs differ from {output} manifest."
+            )
+        sns.set_theme(style="ticks", context="talk")
+        pred_pending = output / ".predictions.pending.pdf"
+        weight_pending = output / ".shared_mlp_weights.pending.pdf"
+        try:
+            prediction_figure(windows, predictions, pred_pending)
+            weights_figure(paths, weight_pending)
+            os.replace(pred_pending, output / "predictions.pdf")
+            os.replace(
+                weight_pending, output / "shared_mlp_weights.pdf"
+            )
+        finally:
+            pred_pending.unlink(missing_ok=True)
+            weight_pending.unlink(missing_ok=True)
+        previous["prediction_line_styles"] = {
+            "3": "dotted", "9": "dashed", "18": "solid"
+        }
+        previous["weight_distribution"] = (
+            "Signed ECDF by shared local MLP layer, "
+            "separate weights and biases; ECDF uses all values; "
+            "x axis shows pooled central 99 percent"
+        )
+        metadata_pending = output / ".manifest.pending.json"
+        with metadata_pending.open("x") as stream:
+            json.dump(previous, stream, indent=2)
+        os.replace(metadata_pending, output / "manifest.json")
+        print(f"Updated diagnostic figures: {output.resolve()}")
+        return
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = root / "diagnostics" / stamp
     output.mkdir(parents=True, exist_ok=False)
@@ -403,6 +483,14 @@ def main() -> None:
             "saved pooled-group train and validation MSE",
         "subject_test_loss":
             "mean groups within seed, then SEM across two seeds",
+        "prediction_line_styles": {
+            "3": "dotted", "9": "dashed", "18": "solid"
+        },
+        "weight_distribution": (
+            "Signed ECDF by shared local MLP layer, "
+            "separate weights and biases; ECDF uses all values; "
+            "x axis shows pooled central 99 percent"
+        ),
     }
     with (output / "manifest.json").open("x") as stream:
         json.dump(manifest, stream, indent=2)
