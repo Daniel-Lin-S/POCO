@@ -41,7 +41,7 @@ PCS = (0, 20, 50)
 SEED = 0
 CONTEXT_FRAMES = 8
 CONTEXT_COLOR = "#e8e8e8"
-MLP_LAYERS = (
+SHARED_HEAD_LAYERS = (
     "in_proj.0",
     "conditioning_alpha",
     "conditioning_beta",
@@ -249,7 +249,7 @@ def training_figure(paths: dict[int, Path], path: Path) -> None:
 
 
 def weights_figure(paths: dict[int, Path], path: Path) -> None:
-    """Plot signed ECDFs of shared local MLP weights and biases.
+    """Plot signed ECDFs of global forecast-head parameters.
 
     Parameters
     ----------
@@ -260,10 +260,11 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
     """
     keys = tuple(
         f"{layer}.{kind}"
-        for layer in MLP_LAYERS
+        for layer in SHARED_HEAD_LAYERS
         for kind in PARAMETER_KINDS
     )
     parameters = {}
+    parameter_shapes = {}
     for size, fit_path in paths.items():
         state = torch.load(
             fit_path / "net_best.pth", map_location="cpu",
@@ -272,11 +273,13 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
         missing = set(keys) - set(state)
         if missing:
             raise ValueError(
-                f"Missing shared MLP parameters {sorted(missing)} "
+                f"Missing shared forecast-head parameters {sorted(missing)} "
                 f"in {fit_path}."
             )
         parameters[size] = {}
+        parameter_shapes[size] = {}
         for key in keys:
+            parameter_shapes[size][key] = tuple(state[key].shape)
             values = state[key].float().numpy().ravel()
             if values.size < 2 or not np.isfinite(values).all():
                 raise ValueError(
@@ -285,16 +288,19 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
                 )
             parameters[size][key] = values
     fig, axes = plt.subplots(4, 2, figsize=(13.5, 14))
-    for row, layer in enumerate(MLP_LAYERS):
+    for row, layer in enumerate(SHARED_HEAD_LAYERS):
         for column, kind in enumerate(PARAMETER_KINDS):
             key = f"{layer}.{kind}"
             ax = axes[row, column]
-            counts = {parameters[size][key].size for size in SIZES}
-            if len(counts) != 1:
+            shapes = {
+                parameter_shapes[size][key] for size in SIZES
+            }
+            if len(shapes) != 1:
                 raise ValueError(
-                    f"Parameter count differs across fits for {key}: "
-                    f"{sorted(counts)}."
+                    f"Shared parameter shape differs across fits "
+                    f"for {key}: {sorted(shapes)}."
                 )
+            count = parameters[SIZES[0]][key].size
             for size in SIZES:
                 sns.ecdfplot(
                     x=parameters[size][key], ax=ax,
@@ -316,7 +322,7 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
             ax.set_xlim(lower - padding, upper + padding)
             ax.axvline(0, color="#333333", linewidth=1, alpha=0.45)
             ax.set_title(
-                f"{key}\n{next(iter(counts)):,} parameters",
+                f"{key} · shared\n{count:,} parameters",
                 fontsize=PANEL_FONT, pad=9,
             )
             ax.set_xlabel(
@@ -333,8 +339,8 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
     handles, labels = axes[0, 0].get_legend_handles_labels()
     save_diagnostic(
         fig, path,
-        "POCO shared local MLP parameter distributions | seed 0\n"
-        "Empirical cumulative distributions; central 99% shown",
+        "POCO shared forecast-head parameters | seed 0\n"
+        "α/β parameters shared; their outputs can vary by session",
         handles, labels,
     )
 
@@ -481,9 +487,21 @@ def main() -> None:
             "3": "solid", "9": "solid", "18": "solid"
         }
         previous["weight_distribution"] = (
-            "Signed ECDF by shared local MLP layer, "
-            "separate weights and biases; ECDF uses all values; "
-            "x axis shows pooled central 99 percent"
+            "Signed ECDF of globally shared forecast-head weights "
+            "and biases; x axis shows pooled central 99 percent"
+        )
+        previous["plotted_shared_parameter_keys"] = [
+            f"{layer}.{kind}"
+            for layer in SHARED_HEAD_LAYERS
+            for kind in PARAMETER_KINDS
+        ]
+        previous["session_dependent_tensors_excluded"] = [
+            "decoder.session_emb.weight", "decoder.unit_emb.weight"
+        ]
+        previous["conditioning_scope"] = (
+            "Alpha and beta projection parameters are globally shared; "
+            "their per-unit outputs depend on decoder embeddings, "
+            "including session embeddings"
         )
         previous["displayed_context_frames"] = CONTEXT_FRAMES
         previous["prediction_colors"] = SESSION_COLORS
@@ -529,9 +547,21 @@ def main() -> None:
             "3": "solid", "9": "solid", "18": "solid"
         },
         "weight_distribution": (
-            "Signed ECDF by shared local MLP layer, "
-            "separate weights and biases; ECDF uses all values; "
-            "x axis shows pooled central 99 percent"
+            "Signed ECDF of globally shared forecast-head weights "
+            "and biases; x axis shows pooled central 99 percent"
+        ),
+        "plotted_shared_parameter_keys": [
+            f"{layer}.{kind}"
+            for layer in SHARED_HEAD_LAYERS
+            for kind in PARAMETER_KINDS
+        ],
+        "session_dependent_tensors_excluded": [
+            "decoder.session_emb.weight", "decoder.unit_emb.weight"
+        ],
+        "conditioning_scope": (
+            "Alpha and beta projection parameters are globally shared; "
+            "their per-unit outputs depend on decoder embeddings, "
+            "including session embeddings"
         ),
     }
     with (output / "manifest.json").open("x") as stream:
