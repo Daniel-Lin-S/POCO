@@ -15,6 +15,7 @@ import numpy as np
 import os
 import models.single_session_models as single_models
 import itertools
+from copy import deepcopy
 
 from configs.configs import SupervisedLearningBaseConfig, NeuralPredictionConfig
 from models.model_utils import get_rnn, get_pretrained_model, get_rnn_from_config
@@ -466,6 +467,19 @@ class Decoder(nn.Module):
             self.linear_out_size = 1
 
         self.conditioning = config.conditioning
+        scopes = (
+            config.in_proj_scope, config.alpha_weight_scope,
+            config.out_weight_scope,
+        )
+        if any(scope not in ('shared', 'session') for scope in scopes):
+            raise ValueError(
+                f'Expected shared or session head scopes, got {scopes}.'
+            )
+        if config.conditioning != 'mlp' and 'session' in scopes:
+            raise ValueError(
+                'Private head parameters require MLP conditioning.'
+            )
+        self._private_head = 'session' in scopes
         self.conditioning_dim = config.conditioning_dim
         if config.conditioning == 'mlp':
             self.in_proj = nn.Sequential(
@@ -485,7 +499,33 @@ class Decoder(nn.Module):
             self.conditioning_beta.weight.data.zero_()
             self.conditioning_beta.bias.data.zero_()
 
-            self.out_proj = nn.Linear(config.conditioning_dim, self.linear_out_size)
+            self.out_proj = nn.Linear(
+                config.conditioning_dim, self.linear_out_size
+            )
+            self.in_proj_scope = config.in_proj_scope
+            self.alpha_weight_scope = config.alpha_weight_scope
+            self.out_weight_scope = config.out_weight_scope
+            if self.in_proj_scope == 'session':
+                self.session_in_projs = nn.ModuleList([
+                    deepcopy(self.in_proj) for _ in input_size
+                ])
+                del self.in_proj
+            if self.alpha_weight_scope == 'session':
+                self.session_alpha_weights = nn.ParameterList([
+                    nn.Parameter(
+                        self.conditioning_alpha.weight.detach().clone()
+                    ) for _ in input_size
+                ])
+                self.conditioning_alpha.register_parameter(
+                    'weight', None
+                )
+            if self.out_weight_scope == 'session':
+                self.session_out_weights = nn.ParameterList([
+                    nn.Parameter(
+                        self.out_proj.weight.detach().clone()
+                    ) for _ in input_size
+                ])
+                self.out_proj.register_parameter('weight', None)
             assert not self.separate_projs, "Separate projs not supported for MLP conditioning"
             assert self.linear_out_size == config.pred_length, "Not implemented for now"
             assert self.embedding_length == 1, "Not implemented for now"
@@ -512,10 +552,17 @@ class Decoder(nn.Module):
 
         if config.freeze_conditioned_net:
             assert config.conditioning == 'mlp', "Only support freezing conditioned net for MLP conditioning"
-            self.in_proj.requires_grad_(False)
+            if self.in_proj_scope == 'session':
+                self.session_in_projs.requires_grad_(False)
+            else:
+                self.in_proj.requires_grad_(False)
             self.conditioning_alpha.requires_grad_(False)
             self.conditioning_beta.requires_grad_(False)
             self.out_proj.requires_grad_(False)
+            if self.alpha_weight_scope == 'session':
+                self.session_alpha_weights.requires_grad_(False)
+            if self.out_weight_scope == 'session':
+                self.session_out_weights.requires_grad_(False)
         
     def forward(self, x, unit_indices=None, unit_timestamps=None):
         """
@@ -592,7 +639,12 @@ class Decoder(nn.Module):
         embed = [xx.reshape(b, d, self.embedding_length, self.embedding_dim) for xx, b, d in zip(embed, bsz, d_list)] # (B, D, 1, E)
 
         preds = []
-        for i, (e, d, input) in enumerate(zip(embed, self.input_size, x_list)):
+        for i, (e, d, input) in enumerate(
+            zip(embed, self.input_size, x_list)
+        ):
+            if self._private_head and e.shape[0] == 0:
+                preds.append(input.new_empty(pred_step, 0, d))
+                continue
             if e.shape[1] < d:
                 assert e.shape[1] == 1
                 e = e.repeat(1, d, 1, 1)
@@ -612,11 +664,29 @@ class Decoder(nn.Module):
                 pred = pred.reshape(b, pred_step, d).permute(0, 2, 1) # B, D, pred_length
             else:
                 if self.conditioning == 'mlp':
-                    alpha = self.conditioning_alpha(e.squeeze(2)) # B, D, cond_dim
+                    if self.alpha_weight_scope == 'session':
+                        alpha = F.linear(
+                            e.squeeze(2),
+                            self.session_alpha_weights[i],
+                            self.conditioning_alpha.bias,
+                        )
+                    else:
+                        alpha = self.conditioning_alpha(e.squeeze(2))
                     beta = self.conditioning_beta(e.squeeze(2)) # B, D, cond_dim
                     input = input.permute(1, 2, 0) # B, D, L
-                    weights = self.in_proj(input) * alpha + beta # B, D, cond_dim
-                    pred = self.out_proj(weights) # B, D, pred_length
+                    projector = (
+                        self.session_in_projs[i]
+                        if self.in_proj_scope == 'session'
+                        else self.in_proj
+                    )
+                    weights = projector(input) * alpha + beta
+                    if self.out_weight_scope == 'session':
+                        pred = F.linear(
+                            weights, self.session_out_weights[i],
+                            self.out_proj.bias,
+                        )
+                    else:
+                        pred = self.out_proj(weights)
                 elif self.conditioning == 'none':
                     pred: torch.Tensor = proj(e.squeeze(2)) # B, D, pred_length
                 else:

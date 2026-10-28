@@ -21,7 +21,7 @@ import torch
 
 from utils.config_utils import configs_dict_unpack
 from configs.config_global import LOG_LEVEL, ROOT_DIR
-from utils.artifacts import validate_complete
+from utils.artifacts import fit_id, validate_complete
 from utils.campaigns.lifecycle import CampaignLog
 from utils.campaigns.fit_worker import fit_command, run_fit
 from utils.campaigns.claims import is_claimed
@@ -132,8 +132,8 @@ def get_jobfile(
 
 
 def fit_job_id(config: BaseConfig) -> str:
-    """Return the hash-named fit directory basename."""
-    return os.path.basename(config.save_path)
+    """Return the scientific fit hash for lifecycle tracking."""
+    return fit_id(config)
 
 
 def record_failure(

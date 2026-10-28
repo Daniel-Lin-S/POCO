@@ -4,6 +4,8 @@ Input is ``config.json`` in a hashed fit directory. Training writes
 ``progress.txt`` with train and validation columns, a validation-selected
 ``net_best.pth``, and ``flops.json``. Final evaluation writes ``test.txt``
 with the same objective on the test split and a validated ``complete.json``.
+The head-sharing campaign also writes ``exposure.json``, mapping each
+subject name to its actual training-window presentations.
 """
 
 import logging
@@ -206,7 +208,7 @@ def forward_backward(
     config: NeuralPredictionConfig, net: nn.Module,
     optimizer: torch.optim.Optimizer, task_func: TaskFunction,
     train_data: DatasetIters
-) -> tuple[torch.Tensor, int]:
+) -> tuple[torch.Tensor, int, list[int]]:
     """Run the weighted training loss and backward pass on one batch.
 
     Parameters
@@ -224,18 +226,21 @@ def forward_backward(
 
     Returns
     -------
-    tuple[torch.Tensor, int]
-        Scalar loss and actual number of training examples.
+    tuple[torch.Tensor, int, list[int]]
+        Loss, total examples, and per-session presentation counts.
     """
     optimizer.zero_grad()
     loss = 0.0
     examples = 0
+    session_counts = []
     for i_loader, train_iter in enumerate(train_data.data_iters):
         data = next(train_iter)
         data = get_full_input(
             data, i_loader, config, train_data.input_sizes
         )
-        examples += sum(x.shape[1] for x in data[0])
+        counts = [x.shape[1] for x in data[0]]
+        examples += sum(counts)
+        session_counts.extend(counts)
         dataset_loss = task_func.roll(net, data, 'train')
         if config.log_loss:
             dataset_loss = torch.log(dataset_loss + LOG_LOSS_EPSILON)
@@ -248,7 +253,7 @@ def forward_backward(
     if not torch.isfinite(loss).all():
         raise ValueError('Weighted training loss is non-finite.')
     loss.backward()
-    return loss, examples
+    return loss, examples, session_counts
 
 @locked_fit
 def model_train(config: NeuralPredictionConfig) -> None:
@@ -339,6 +344,9 @@ def model_train(config: NeuralPredictionConfig) -> None:
     break_flag = False
     train_loss = 0.0
     train_examples_seen = 0
+    session_examples_seen = [
+        0 for group in train_data.input_sizes for _ in group
+    ]
 
     for epoch in range(config.num_ep):
         train_data.reset()
@@ -351,7 +359,7 @@ def model_train(config: NeuralPredictionConfig) -> None:
                 torch.save(net.state_dict(), osp.join(config.save_path, 'net_{}.pth'.format(i_b + 1)))
 
             if i_b == 0:
-                flops, (loss, examples) = measure_train_step(
+                flops, (loss, examples, counts) = measure_train_step(
                     lambda: forward_backward(
                         config, net, optimizer, task_func, train_data
                     )
@@ -361,7 +369,7 @@ def model_train(config: NeuralPredictionConfig) -> None:
                 with open(osp.join(config.save_path, 'flops.json'), 'x') as f:
                     json.dump(flops, f, indent=2)
             else:
-                loss, examples = forward_backward(
+                loss, examples, counts = forward_backward(
                     config, net, optimizer, task_func, train_data
                 )
             # gradient clipping
@@ -371,6 +379,15 @@ def model_train(config: NeuralPredictionConfig) -> None:
             optimizer.step()
             train_loss += loss.item()
             train_examples_seen += examples
+            if len(counts) != len(session_examples_seen):
+                raise ValueError(
+                    f'Expected {len(session_examples_seen)} session '
+                    f'counts, got {len(counts)}.'
+                )
+            session_examples_seen = [
+                previous + current for previous, current
+                in zip(session_examples_seen, counts)
+            ]
 
             # log performance
             log_count = i_b % config.log_every + 1
@@ -409,6 +426,20 @@ def model_train(config: NeuralPredictionConfig) -> None:
     duration_min = (time.time() - start_time) / 60
     logging.info('Total training time: %.2f mins', duration_min)
 
+    if config.experiment_name == 'ahrens_head_sharing_factorial':
+        label = config.dataset_label[0]
+        subjects = config.dataset_config[label].session_ids
+        if (len(subjects) != len(session_examples_seen) or
+                sum(session_examples_seen) != train_examples_seen):
+            raise ValueError(
+                'Per-subject training exposure does not match '
+                'the recorded training examples.'
+            )
+        exposure = dict(zip(subjects, session_examples_seen))
+        with (Path(config.save_path) / 'exposure.json').open(
+            'x', encoding='utf-8'
+        ) as stream:
+            json.dump(exposure, stream, indent=2)
     task_func.after_training_callback(config, net)
     log_complete(config.save_path, train_start_time)
 

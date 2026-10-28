@@ -57,6 +57,7 @@ MODEL_ARCHITECTURE_FIELDS = {
     'mu_std_loss_coef', 'mu_module_mode', 'std_module_mode',
     'mu_std_separate_projs', 'compression_factor', 'conditioning',
     'conditioning_dim', 'conditioning_layers',
+    'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope',
     'freeze_conditioned_net', 'decoder_context_length',
     'poyo_num_latents', 'latent_session_embedding',
     'unit_embedding_components', 'poyo_query_mode',
@@ -126,7 +127,10 @@ def active_model_fields(config: dict) -> set[str] | None:
         return None
     fields = DECODER_COMMON_FIELDS | DECODER_TYPE_FIELDS[decoder_type]
     if config['conditioning'] == 'mlp':
-        fields |= {'conditioning_dim', 'conditioning_layers'}
+        fields |= {
+            'conditioning_dim', 'conditioning_layers',
+            'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope',
+        }
     elif config['separate_projs']:
         fields |= {'decoder_proj_init'}
     return fields
@@ -148,6 +152,11 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
     result = config.to_dict().copy()
     for field in NONSCIENTIFIC_FIELDS:
         result.pop(field, None)
+    for field in (
+        'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope'
+    ):
+        if result.get(field, 'shared') == 'shared':
+            result.pop(field, None)
     active_fields = active_model_fields(result)
     if active_fields is not None:
         for field in MODEL_ARCHITECTURE_FIELDS - active_fields:
@@ -194,7 +203,13 @@ def assign_fit_path(config: NeuralPredictionConfig) -> None:
     config : NeuralPredictionConfig
         Configuration whose ``save_path`` is set in place.
     """
-    config.save_path = str(Path(ARTIFACT_ROOT) / 'fits' / fit_id(config))
+    identity = fit_id(config)
+    legacy = Path(ARTIFACT_ROOT) / 'fits' / identity
+    label = config.model_label
+    if not isinstance(label, str) or not label:
+        raise ValueError('Model label is required for fit artifacts.')
+    named = Path(ARTIFACT_ROOT) / 'fits' / f'{label}-{identity}'
+    config.save_path = str(legacy if legacy.exists() else named)
 
 
 def validate_complete(config: NeuralPredictionConfig) -> bool:
@@ -221,7 +236,13 @@ def validate_complete(config: NeuralPredictionConfig) -> bool:
             return False
         if record['steps'] != config.max_batch:
             return False
-        if set(record['files']) != set(REQUIRED_FILES):
+        required = set(REQUIRED_FILES)
+        if (config.experiment_name == 'ahrens_head_sharing_factorial'
+                and fit_dir.name.startswith(
+                    f'{config.model_label}-'
+                )):
+            required.add('exposure.json')
+        if set(record['files']) != required:
             return False
         for name, expected in record['files'].items():
             path = fit_dir / name
@@ -411,7 +432,10 @@ def mark_complete(config: NeuralPredictionConfig) -> None:
         raise RuntimeError(
             f'Invalid completion marker already exists: {marker}'
         )
-    files = {name: file_digest(fit_dir / name) for name in REQUIRED_FILES}
+    required = list(REQUIRED_FILES)
+    if config.experiment_name == 'ahrens_head_sharing_factorial':
+        required.append('exposure.json')
+    files = {name: file_digest(fit_dir / name) for name in required}
     record = {'version': FIT_VERSION, 'fit_id': fit_id(config),
               'steps': config.max_batch, 'files': files}
     pending = fit_dir / 'complete.json.pending'

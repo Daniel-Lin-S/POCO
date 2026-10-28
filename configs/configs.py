@@ -134,6 +134,9 @@ class SupervisedLearningBaseConfig(BaseConfig):
         self.conditioning = 'none' # or 'mlp'
         self.conditioning_dim = 1024
         self.conditioning_layers = 1
+        self.in_proj_scope = 'shared'
+        self.alpha_weight_scope = 'shared'
+        self.out_weight_scope = 'shared'
         self.freeze_conditioned_net = False
         self.decoder_context_length = None # if not None, use the last decoder_context_length steps as input to the decoder model
 

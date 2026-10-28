@@ -28,12 +28,16 @@ FIT_LOCK_POLL_SECONDS = 10
 PLOTTED_CAMPAIGNS = {
     'ahrens_length_lowpass_four', 'ahrens_session_lowpass_six',
     'ahrens_session_lowpass_extended',
+    'ahrens_head_sharing_factorial',
 }
 
 
 def render_fit_figures(config: NeuralPredictionConfig) -> None:
     """Refresh fit PDFs after scientific completion, if applicable."""
     if config.experiment_name not in PLOTTED_CAMPAIGNS:
+        return
+    if (config.experiment_name == 'ahrens_head_sharing_factorial'
+            and Path(config.save_path).name == fit_id(config)):
         return
     try:
         from analysis.fit_diagnostics import render_completed_fit_figures
@@ -115,7 +119,10 @@ def run_fit(
     if action not in ('train', 'eval'):
         raise ValueError(f'Unknown fit action {action!r}.')
     job_id = fit_id(config)
-    if Path(config.save_path).name != job_id:
+    accepted_names = {
+        job_id, f'{config.model_label}-{job_id}',
+    }
+    if Path(config.save_path).name not in accepted_names:
         raise ValueError(
             f'Fit path {config.save_path} does not match {job_id}.'
         )
