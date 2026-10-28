@@ -180,7 +180,7 @@ def prediction_figure(
         "POCO on identical Ahrens test windows; seed 0; "
         "best-scoring nine-session group shown", 75,
     ), y=0.995, fontsize=20)
-    fig.tight_layout(rect=(0, 0.075, 1, 0.91))
+    fig.tight_layout(rect=(0, 0.075, 1, 0.95))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -223,7 +223,7 @@ def training_figure(paths: dict[int, Path], path: Path) -> None:
         "POCO pooled-group loss histories; validation "
         "population differs by group size", 75,
     ), y=0.99, fontsize=19)
-    fig.tight_layout(rect=(0, 0.09, 1, 0.9))
+    fig.tight_layout(rect=(0, 0.09, 1, 0.95))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -317,7 +317,7 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
         "POCO shared local MLP parameter distributions; "
         "selected checkpoints, seed 0", 75,
     ), y=0.995, fontsize=20)
-    fig.tight_layout(rect=(0, 0.06, 1, 0.94))
+    fig.tight_layout(rect=(0, 0.06, 1, 0.965))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -377,7 +377,7 @@ def subject_loss_figure(table: pd.DataFrame, path: Path) -> None:
         "POCO fixed-subject test loss; groups averaged within seed; "
         "error bars are SEM across two seeds", 75,
     ), y=0.99, fontsize=19)
-    fig.tight_layout(rect=(0, 0, 1, 0.85))
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
 
@@ -435,18 +435,33 @@ def main() -> None:
                 f"Selected fit IDs differ from {output} manifest."
             )
         sns.set_theme(style="ticks", context="talk")
-        pred_pending = output / ".predictions.pending.pdf"
-        weight_pending = output / ".shared_mlp_weights.pending.pdf"
+        pending_figures = {
+            "predictions.pdf": output / ".predictions.pending.pdf",
+            "training_dynamics.pdf":
+                output / ".training_dynamics.pending.pdf",
+            "shared_mlp_weights.pdf":
+                output / ".shared_mlp_weights.pending.pdf",
+            "subject_test_loss.pdf":
+                output / ".subject_test_loss.pending.pdf",
+        }
         try:
-            prediction_figure(windows, predictions, pred_pending)
-            weights_figure(paths, weight_pending)
-            os.replace(pred_pending, output / "predictions.pdf")
-            os.replace(
-                weight_pending, output / "shared_mlp_weights.pdf"
+            prediction_figure(
+                windows, predictions, pending_figures["predictions.pdf"]
             )
+            training_figure(
+                paths, pending_figures["training_dynamics.pdf"]
+            )
+            weights_figure(
+                paths, pending_figures["shared_mlp_weights.pdf"]
+            )
+            subject_loss_figure(
+                table, pending_figures["subject_test_loss.pdf"]
+            )
+            for name, pending in pending_figures.items():
+                os.replace(pending, output / name)
         finally:
-            pred_pending.unlink(missing_ok=True)
-            weight_pending.unlink(missing_ok=True)
+            for pending in pending_figures.values():
+                pending.unlink(missing_ok=True)
         previous["prediction_line_styles"] = {
             "3": "dotted", "9": "dashed", "18": "solid"
         }
