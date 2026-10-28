@@ -1,8 +1,8 @@
 """Render matched POCO Ahrens test traces and diagnostic figures.
 
 Input is a completed fixed-reference report with fixed_reference_per_fit.csv.
-Output is a diagnostics/<UTC timestamp> folder with four PDFs and a
-manifest. Fit checkpoints and scientific results remain read only.
+Output is a diagnostics/<UTC timestamp> folder with five PDFs, an
+effective-offset CSV, and a manifest. Saved fits remain read only.
 """
 
 import argparse
@@ -49,6 +49,8 @@ SHARED_HEAD_LAYERS = (
 )
 PARAMETER_KINDS = ("weight", "bias")
 WEIGHT_VIEW_QUANTILES = (0.005, 0.995)
+OFFSET_PAD_FRACTION = 0.08
+OFFSET_MIN_PAD = 0.005
 
 
 def selected_fits(table: pd.DataFrame) -> dict[int, str]:
@@ -345,6 +347,141 @@ def weights_figure(paths: dict[int, Path], path: Path) -> None:
     )
 
 
+def effective_offset_table(paths: dict[int, Path]) -> pd.DataFrame:
+    """Compute the shared constant forecast term at each horizon step.
+
+    Parameters
+    ----------
+    paths : dict[int, pathlib.Path]
+        Session count to completed fit directory.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per session count and forecast step, with output-bias,
+        beta-bias contribution, and their sum in PC activity units.
+    """
+    records = []
+    for size, fit_path in paths.items():
+        config = load_config(str(fit_path))
+        if not validate_complete(config):
+            raise ValueError(f"Incomplete fit: {fit_path}.")
+        if (config.conditioning != "mlp" or
+                config.normalize_input or
+                config.mu_module_mode != "none" or
+                config.std_module_mode != "none"):
+            raise ValueError(
+                f"Expected MLP conditioning and identity output "
+                f"normalization in {fit_path}."
+            )
+        state = torch.load(
+            fit_path / "net_best.pth", map_location="cpu",
+            weights_only=True,
+        )
+        keys = (
+            "out_proj.weight", "conditioning_beta.bias",
+            "out_proj.bias",
+        )
+        missing = set(keys) - set(state)
+        if missing:
+            raise ValueError(
+                f"Missing effective-offset tensors {sorted(missing)} "
+                f"in {fit_path}."
+            )
+        output_weight = state[keys[0]].double().numpy()
+        beta_bias = state[keys[1]].double().numpy()
+        output_bias = state[keys[2]].double().numpy()
+        expected_weight = (
+            config.pred_length, config.conditioning_dim
+        )
+        if (output_weight.shape != expected_weight or
+                beta_bias.shape != (config.conditioning_dim,) or
+                output_bias.shape != (config.pred_length,)):
+            raise ValueError(
+                f"Expected W_o {expected_weight}, b_beta "
+                f"{(config.conditioning_dim,)}, and b_o "
+                f"{(config.pred_length,)} in {fit_path}; got "
+                f"{output_weight.shape}, {beta_bias.shape}, "
+                f"and {output_bias.shape}."
+            )
+        beta_contribution = output_weight @ beta_bias
+        offset = beta_contribution + output_bias
+        arrays = (output_weight, beta_bias, output_bias, offset)
+        if any(not np.isfinite(array).all() for array in arrays):
+            raise ValueError(
+                f"Non-finite effective offset in {fit_path}."
+            )
+        for step, (beta_term, bias, total) in enumerate(zip(
+            beta_contribution, output_bias, offset
+        )):
+            records.append({
+                "training_sessions": size,
+                "forecast_step": step,
+                "W_o_times_b_beta": float(beta_term),
+                "b_o": float(bias),
+                "effective_constant_offset": float(total),
+            })
+    return pd.DataFrame(records)
+
+
+def effective_offset_figure(
+    table: pd.DataFrame, path: Path,
+) -> None:
+    """Plot the checkpoint constant term by forecast step and scale.
+
+    Parameters
+    ----------
+    table : pandas.DataFrame
+        Effective-offset table with one row per scale and step.
+    path : pathlib.Path
+        Absolute PDF destination.
+    """
+    fig, ax = plt.subplots(figsize=(10.5, 6.3))
+    for size in SIZES:
+        rows = table.loc[table.training_sessions == size]
+        if rows.empty:
+            raise ValueError(f"No offset rows for {size} sessions.")
+        rows = rows.sort_values("forecast_step")
+        steps = rows.forecast_step.to_numpy(dtype=int)
+        if not np.array_equal(steps, np.arange(len(steps))):
+            raise ValueError(
+                f"Expected consecutive forecast steps for "
+                f"{size} sessions, got {steps.tolist()}."
+            )
+        values = rows.effective_constant_offset.to_numpy(dtype=float)
+        if not np.isfinite(values).all():
+            raise ValueError(
+                f"Non-finite constant offset for {size} sessions."
+            )
+        sns.lineplot(
+            x=steps, y=values, ax=ax,
+            color=SESSION_COLORS[size],
+            linewidth=SESSION_WIDTHS[size], marker="o",
+            markersize=7, estimator=None,
+            label=f"{size} sessions",
+        )
+    values = table.effective_constant_offset.to_numpy(dtype=float)
+    lower, upper = float(values.min()), float(values.max())
+    padding = max((upper - lower) * OFFSET_PAD_FRACTION,
+                  OFFSET_MIN_PAD)
+    ax.set_ylim(lower - padding, upper + padding)
+    ax.set_xlim(0, int(table.forecast_step.max()))
+    ax.set_xticks(np.arange(0, int(table.forecast_step.max()) + 1, 3))
+    ax.axhline(0, color="#333333", linewidth=1.5, linestyle=":")
+    ax.set_xlabel("Forecast step", fontsize=LABEL_FONT)
+    ax.set_ylabel("Constant offset (PC activity)", fontsize=LABEL_FONT)
+    ax.tick_params(labelsize=TICK_FONT)
+    sns.despine(ax=ax)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend().remove()
+    save_diagnostic(
+        fig, path,
+        "POCO shared-head constant offset | seed 0\n"
+        r"$W_o b_\beta + b_o$; input and embedding terms excluded",
+        handles, labels,
+    )
+
+
 def subject_loss_figure(table: pd.DataFrame, path: Path) -> None:
     """Plot fixed-subject test MSE, averaging groups within each seed."""
     rows = table.loc[
@@ -464,6 +601,8 @@ def main() -> None:
                 output / ".shared_mlp_weights.pending.pdf",
             "subject_test_loss.pdf":
                 output / ".subject_test_loss.pending.pdf",
+            "effective_constant_offset.pdf":
+                output / ".effective_constant_offset.pending.pdf",
         }
         try:
             prediction_figure(
@@ -478,11 +617,23 @@ def main() -> None:
             subject_loss_figure(
                 table, pending_figures["subject_test_loss.pdf"]
             )
+            offset_table = effective_offset_table(paths)
+            effective_offset_figure(
+                offset_table,
+                pending_figures["effective_constant_offset.pdf"],
+            )
+            csv_pending = output / ".effective_constant_offset.pending.csv"
+            offset_table.to_csv(csv_pending, index=False)
             for name, pending in pending_figures.items():
                 os.replace(pending, output / name)
+            os.replace(
+                csv_pending, output / "effective_constant_offset.csv"
+            )
         finally:
             for pending in pending_figures.values():
                 pending.unlink(missing_ok=True)
+            csv_pending = output / ".effective_constant_offset.pending.csv"
+            csv_pending.unlink(missing_ok=True)
         previous["prediction_line_styles"] = {
             "3": "solid", "9": "solid", "18": "solid"
         }
@@ -502,6 +653,10 @@ def main() -> None:
             "Alpha and beta projection parameters are globally shared; "
             "their per-unit outputs depend on decoder embeddings, "
             "including session embeddings"
+        )
+        previous["effective_constant_offset"] = (
+            "W_o @ b_beta + b_o, one value per forecast step; "
+            "identity output normalization for these fits"
         )
         previous["displayed_context_frames"] = CONTEXT_FRAMES
         previous["prediction_colors"] = SESSION_COLORS
@@ -526,11 +681,22 @@ def main() -> None:
     training_figure(paths, output / "training_dynamics.pdf")
     weights_figure(paths, output / "shared_mlp_weights.pdf")
     subject_loss_figure(table, output / "subject_test_loss.pdf")
+    offset_table = effective_offset_table(paths)
+    effective_offset_figure(
+        offset_table, output / "effective_constant_offset.pdf"
+    )
+    offset_table.to_csv(
+        output / "effective_constant_offset.csv", index=False
+    )
     manifest = {
         "seed": SEED,
         "reference_subjects": SUBJECTS,
         "pc_indices": PCS,
         "test_window_offset": 0,
+        "effective_constant_offset": (
+            "W_o @ b_beta + b_o, one value per forecast step; "
+            "identity output normalization for these fits"
+        ),
         "displayed_context_frames": CONTEXT_FRAMES,
         "prediction_colors": SESSION_COLORS,
         "prediction_widths_points": SESSION_WIDTHS,
