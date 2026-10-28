@@ -232,7 +232,9 @@ def forward_backward(
     optimizer.zero_grad()
     loss = 0.0
     examples = 0
-    session_counts = []
+    session_counts = [
+        0 for group in train_data.input_sizes for _ in group
+    ]
     for i_loader, train_iter in enumerate(train_data.data_iters):
         data = next(train_iter)
         data = get_full_input(
@@ -240,7 +242,15 @@ def forward_backward(
         )
         counts = [x.shape[1] for x in data[0]]
         examples += sum(counts)
-        session_counts.extend(counts)
+        if len(counts) != len(session_counts):
+            raise ValueError(
+                f'Expected {len(session_counts)} session counts, '
+                f'got {len(counts)}.'
+            )
+        session_counts = [
+            previous + current for previous, current
+            in zip(session_counts, counts)
+        ]
         dataset_loss = task_func.roll(net, data, 'train')
         if config.log_loss:
             dataset_loss = torch.log(dataset_loss + LOG_LOSS_EPSILON)
