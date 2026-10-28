@@ -16,6 +16,9 @@ from configs.campaigns.ahrens_session import load_ahrens_session_campaign
 from configs.campaigns.ahrens_session_extended import (
     load_ahrens_session_extended_campaign,
 )
+from configs.campaigns.ahrens_head_sharing import (
+    load_ahrens_head_sharing_campaign,
+)
 from utils.ahrens_sessions import (
     equal_group_counts, equal_subject_group_labels,
     processed_subject_names, require_matching_subjects,
@@ -793,6 +796,38 @@ def ahrens_session_lowpass_fixed_priority() -> dict:
             )
         ]
     return selected
+
+
+
+def ahrens_head_sharing_factorial() -> dict:
+    """Resolve the nested full-factorial POCO sharing campaign.
+
+    Returns
+    -------
+    dict
+        Ninety-six scientific fit configurations grouped by seed.
+    """
+    settings = load_ahrens_head_sharing_campaign()
+    labels = [
+        f"zebrafishahrens_pc-{'+'.join(settings['groups'][str(size)])}"
+        for size in (3, 6, 9, 18)
+    ]
+    config = NeuralPredictionConfig()
+    config.experiment_name = 'ahrens_head_sharing_factorial'
+    config.max_batch = settings['max_batch']
+    ranges = OrderedDict()
+    ranges['dataset_filter'] = [settings['filter']]
+    ranges['dataset_label'] = labels
+    ranges['model_label'] = [settings['model']]
+    for field in (
+        'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope'
+    ):
+        ranges[field] = settings['sharing_scopes']
+    configs = vary_config(
+        config, ranges, mode='combinatorial',
+        num_seed=settings['seeds'],
+    )
+    return configure_dataset(configure_models(configs))
 
 
 def ahrens_length_lowpass_four() -> dict:

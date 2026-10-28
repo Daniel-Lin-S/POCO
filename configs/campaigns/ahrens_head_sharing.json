@@ -1,0 +1,56 @@
+{
+  "filter": "lowpass",
+  "model": "POCO",
+  "seeds": 3,
+  "max_batch": 10000,
+  "groups": {
+    "3": [
+      "subject_8",
+      "subject_09",
+      "subject_11"
+    ],
+    "6": [
+      "subject_8",
+      "subject_09",
+      "subject_11",
+      "subject_12",
+      "subject_17",
+      "subject_18"
+    ],
+    "9": [
+      "subject_1",
+      "subject_2",
+      "subject_3",
+      "subject_8",
+      "subject_09",
+      "subject_11",
+      "subject_12",
+      "subject_17",
+      "subject_18"
+    ],
+    "18": [
+      "subject_1",
+      "subject_2",
+      "subject_3",
+      "subject_4",
+      "subject_5",
+      "subject_6",
+      "subject_7",
+      "subject_8",
+      "subject_09",
+      "subject_10",
+      "subject_11",
+      "subject_12",
+      "subject_13",
+      "subject_14",
+      "subject_15",
+      "subject_16",
+      "subject_17",
+      "subject_18"
+    ]
+  },
+  "sharing_scopes": [
+    "shared",
+    "session"
+  ]
+}
