@@ -29,6 +29,7 @@ PLOTTED_CAMPAIGNS = {
     'ahrens_length_lowpass_four', 'ahrens_session_lowpass_six',
     'ahrens_session_lowpass_extended',
     'ahrens_head_sharing_factorial',
+    'ahrens_input_projection_scaling',
 }
 
 
@@ -39,6 +40,12 @@ def render_fit_figures(config: NeuralPredictionConfig) -> None:
     if (config.experiment_name == 'ahrens_head_sharing_factorial'
             and Path(config.save_path).name == fit_id(config)):
         return
+    if config.experiment_name == 'ahrens_input_projection_scaling':
+        saved = Path(config.save_path) / 'config.json'
+        if saved.is_file():
+            record = json.loads(saved.read_text())
+            if record.get('experiment_name') != config.experiment_name:
+                return
     try:
         from analysis.fit_diagnostics import render_completed_fit_figures
 
