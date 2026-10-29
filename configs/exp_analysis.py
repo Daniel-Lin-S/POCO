@@ -1571,3 +1571,9 @@ def unit_embedding_analysis():
         cfg: NeuralPredictionConfig = cfgs[0][idx]
         if cfg.model_label in model_list and cfg.dataset_label[0] in dataset_list:
             analyze_embedding.analyze_embedding_all_seeds(cfgs, idx, methods=['PCA', 'UMAP'])
+
+def ahrens_five_triple_scaling_analysis() -> None:
+    """Publish the complete five-triple POCO/local-MLP comparison."""
+    from analysis.ahrens_head_sharing import analyze_ahrens_five_triples
+
+    analyze_ahrens_five_triples()

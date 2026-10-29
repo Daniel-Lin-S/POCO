@@ -87,6 +87,8 @@ def subject_errors(
         Complete fit with one dataset and ordered subject names.
     phase : str
         Validation or test split.
+    expected_count : int, optional
+        Independent baseline estimates per subject, default 4.
 
     Returns
     -------
@@ -179,6 +181,7 @@ def reported_metrics(
 def reference_baselines(
     configs: list[NeuralPredictionConfig],
     reference: list[str], phase: str,
+    expected_count: int = BASELINE_FIT_COUNT,
 ) -> dict[str, float]:
     """Recover fixed-subject copy baselines from completed singletons.
 
@@ -223,11 +226,11 @@ def reference_baselines(
     result = {}
     for subject in reference:
         values = estimates[subject]
-        if len(values) != BASELINE_FIT_COUNT or not np.allclose(
+        if len(values) != expected_count or not np.allclose(
             values, values[0], rtol=BASELINE_TOLERANCE,
         ):
             raise ValueError(
-                f'Expected four matching {phase} baselines for '
+                f'Expected {expected_count} matching {phase} baselines for '
                 f'{subject}, got {values}.'
             )
         result[subject] = float(np.mean(values))

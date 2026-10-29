@@ -36,6 +36,7 @@ from configs.experiments import (
 from utils.artifacts import fit_id, validate_complete
 from utils.config_utils import configs_dict_unpack
 
+FIVE_TRIPLE_FIT_COUNT = 216
 REFERENCE = ("subject_8", "subject_09", "subject_11")
 SIZES = (3, 6, 9, 18)
 FACTOR_BITS = {
@@ -922,6 +923,9 @@ def analyze_ahrens_head_sharing_factorial() -> Path:
 
 def read_input_projection_fits(
     campaign: str = 'poco',
+    configs: list | None = None,
+    reference: tuple[str, ...] = REFERENCE,
+    baselines: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Read validated POCO or local-MLP sharing fits.
 
@@ -929,13 +933,21 @@ def read_input_projection_fits(
     ----------
     campaign : str, optional
         'poco' or 'local_mlp', default 'poco'.
+    configs : list or None, optional
+        Explicit resolved fits, default the selected campaign factory.
+    reference : tuple[str, ...], optional
+        Fixed evaluation subjects, default subjects 8, 09, and 11.
+    baselines : dict or None, optional
+        Phase-to-subject copy MSE, default established triple baselines.
 
     Returns
     -------
     tuple[pandas.DataFrame, pandas.DataFrame]
         Per-fit metrics/resources and per-subject validation/test errors.
     """
-    if campaign == 'poco':
+    if configs is not None:
+        expected_count = len(configs)
+    elif campaign == 'poco':
         factory = ahrens_input_projection_scaling
         expected_count = INPUT_COMPARISON_FITS
     elif campaign == 'local_mlp':
@@ -943,7 +955,8 @@ def read_input_projection_fits(
         expected_count = LOCAL_MLP_FITS
     else:
         raise ValueError(f'Unknown sharing campaign: {campaign}.')
-    configs = configs_dict_unpack(factory())
+    if configs is None:
+        configs = configs_dict_unpack(factory())
     if len(configs) != expected_count:
         raise ValueError(
             f'Expected {expected_count} {campaign} fits, '
@@ -953,8 +966,9 @@ def read_input_projection_fits(
         raise ValueError(
             f'Duplicate {campaign} fit identities.'
         )
-    baselines = reference_copy_baselines()
-    reference = set(REFERENCE)
+    if baselines is None:
+        baselines = reference_copy_baselines()
+    reference = set(reference)
     rows = []
     subject_rows = []
     protocol = {}
@@ -1000,7 +1014,7 @@ def read_input_projection_fits(
         }
         for phase in ('val', 'test'):
             errors = subject_errors(config, phase)
-            evaluated = subjects if size == 1 else REFERENCE
+            evaluated = subjects if size == 1 else sorted(reference)
             score, loss = fixed_metrics(
                 errors, list(evaluated), baselines[phase],
             )
@@ -1039,6 +1053,7 @@ def summarize_input_projection(
     per_fit: pd.DataFrame, per_subject: pd.DataFrame,
     group_policies: tuple[str, ...] = ('full', 'input_only'),
     baseline_policies: tuple[str, ...] = ('independent',),
+    reference: tuple[str, ...] = REFERENCE,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate groups within seed, then three independent seeds.
 
@@ -1052,6 +1067,8 @@ def summarize_input_projection(
         Group model labels, default full and input_only.
     baseline_policies : tuple[str, ...], optional
         Singleton model labels, default independent.
+    reference : tuple[str, ...], optional
+        Fixed evaluation subjects, default subjects 8, 09, and 11.
 
     Returns
     -------
@@ -1081,7 +1098,7 @@ def summarize_input_projection(
         singleton = per_subject.loc[
             per_subject.policy == policy
         ]
-        expected_rows = len(REFERENCE) * SEED_COUNT * 2
+        expected_rows = len(reference) * SEED_COUNT * 2
         if len(singleton) != expected_rows:
             raise ValueError(
                 f'Expected {expected_rows} {policy} subject rows.'
@@ -1097,7 +1114,7 @@ def summarize_input_projection(
                     (singleton.seed == seed) &
                     (singleton.phase == phase)
                 ]
-                if set(subset.subject) != set(REFERENCE):
+                if set(subset.subject) != set(reference):
                     raise ValueError(
                         f'Missing {policy} reference subjects '
                         f'for seed {seed}, {phase}.'
@@ -1613,4 +1630,129 @@ def analyze_ahrens_local_mlp_scaling() -> Path:
         json.dumps(manifest, indent=2) + '\n'
     )
     print(f'Saved local-MLP comparison figures: {output.resolve()}')
+    return output
+
+
+def analyze_ahrens_five_triples() -> Path:
+    """Publish fixed-triple figures after every required fit validates.
+
+    Returns
+    -------
+    pathlib.Path
+        Comparison root containing per-triple score/MSE figures and
+        seed summaries, plus shared per-fit and per-subject tables.
+        Groups are averaged within seed; triples are not replicates.
+    """
+    from configs.campaigns.ahrens_head_sharing import (
+        load_ahrens_five_triple_campaign, five_triple_groups,
+    )
+    from configs.experiments import ahrens_five_triple_scaling
+
+    settings = load_ahrens_five_triple_campaign()
+    configs = configs_dict_unpack(ahrens_five_triple_scaling())
+    if (len(configs) != FIVE_TRIPLE_FIT_COUNT or
+            len({fit_id(c) for c in configs}) != FIVE_TRIPLE_FIT_COUNT):
+        raise ValueError('Expected 216 unique five-triple fits.')
+    for config in configs:
+        if not validate_complete(config):
+            raise ValueError(f'Incomplete fit: {config.save_path}.')
+    output = Path(FIG_DIR) / 'ahrens_five_triple_scaling'
+    tables = []
+    subject_tables = []
+    seed_tables = []
+    summaries = []
+    prepared = []
+    for code in settings['paths']:
+        reference = tuple(settings['triples'][code])
+        groups = {tuple(g) for g in five_triple_groups(settings, code)}
+        groups.update((s,) for s in reference)
+        selected = [c for c in configs if tuple(
+            c.dataset_config[c.dataset_label[0]].session_ids
+        ) in groups]
+        baselines = {
+            phase: reference_baselines(
+                selected, list(reference), phase, expected_count=6,
+            ) for phase in ('val', 'test')
+        }
+        protocol = {}
+        for config in selected:
+            members = config.dataset_config[
+                config.dataset_label[0]
+            ].session_ids
+            for subject in set(reference).intersection(members):
+                if subject in protocol:
+                    require_matching_subject_protocol(
+                        protocol[subject], config, subject,
+                    )
+                else:
+                    protocol[subject] = config
+        fits = []
+        errors = []
+        for model, campaign in (('POCO', 'poco'), ('MLP', 'local_mlp')):
+            per_fit, per_subject = read_input_projection_fits(
+                campaign=campaign,
+                configs=[c for c in selected if c.model_label == model],
+                reference=reference, baselines=baselines,
+            )
+            fits.append(per_fit)
+            errors.append(per_subject)
+        fit_table = pd.concat(fits, ignore_index=True)
+        subject_table = pd.concat(errors, ignore_index=True)
+        seed_table, summary = summarize_input_projection(
+            fit_table, subject_table,
+            group_policies=('full', 'local_mlp'),
+            baseline_policies=('independent', 'local_mlp_independent'),
+            reference=reference,
+        )
+        for table in (fit_table, subject_table, seed_table, summary):
+            table.insert(0, 'reference_triple', code)
+        tables.append(fit_table)
+        subject_tables.append(subject_table)
+        seed_tables.append(seed_table)
+        summaries.append(summary)
+        prepared.append((code, reference, summary))
+    output.mkdir(parents=True, exist_ok=True)
+    styles = (
+        ('full', 'POCO: full sharing', SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP: private outputs', PRIVATE_COLOR, '--'),
+    )
+    baselines_style = (
+        ('independent', 'Independent POCO', ':'),
+        ('local_mlp_independent', 'Independent local MLP', '-.'),
+    )
+    sns.set_theme(style='ticks', context='talk')
+    for code, reference, summary in prepared:
+        folder = output / f'triple_{code}'
+        folder.mkdir(exist_ok=True)
+        subjects = ', '.join(s.removeprefix('subject_') for s in reference)
+        title = (
+            f'Fixed-reference subjects {subjects}\n'
+            'Three-seed mean ± SEM; three groups at 6 and 9 sessions'
+        )
+        for metric, name in (('test_score', 'score'), ('test_loss', 'mse')):
+            plot_input_projection(
+                summary, metric, folder / f'{name}{FIGURE_SUFFIX}',
+                styles=styles, baselines=baselines_style, title=title,
+            )
+    for name, collection in (
+        ('per_fit', tables), ('per_subject', subject_tables),
+        ('within_seed', seed_tables), ('summary', summaries),
+    ):
+        write_table(pd.concat(collection, ignore_index=True),
+                    output / f'{name}.csv')
+    manifest = {
+        'configuration': settings,
+        'fit_ids': [fit_id(c) for c in configs],
+        'selection': 'Pooled group validation MSE.',
+        'aggregation': (
+            'Groups within each seed; mean and SEM across three seeds. '
+            'Shared fits across triples do not create independent repeats.'
+        ),
+        'test_score': 'Equal-subject persistence-normalized score.',
+        'test_loss': 'Pooled exact MSE within each evaluation triple.',
+    }
+    (output / 'manifest.json').write_text(
+        json.dumps(manifest, indent=2) + '\n'
+    )
+    print(f'Saved five-triple comparison: {output.resolve()}')
     return output
