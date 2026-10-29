@@ -3,6 +3,7 @@ import os
 import random
 import numpy as np
 
+from analysis.diagnostics.figure_style import FIGURE_SUFFIX
 from utils.curbd import threeRegionSim
 from configs.config_global import SIM_DIR
 from .utils import process_data_matrix
@@ -36,7 +37,10 @@ def run(
     frac_inter = 0 if mode == 1 else 0.05
     out = threeRegionSim(
         number_units=n, dtData=0.01, tau=0.1, T=T, 
-        fig_save_name=name + f'_.pdf', leadTime=500, fracInterReg=frac_inter, ga=ga, noise_std=noise_std, sparsity=sparsity, one_region=(mode == 1),
+        fig_save_name=name + f'_{FIGURE_SUFFIX}',
+        leadTime=500, fracInterReg=frac_inter, ga=ga,
+        noise_std=noise_std, sparsity=sparsity,
+        one_region=(mode == 1),
         template_connectivity=template_connectivity, connectivity_noise=connectivity_noise
     )
 

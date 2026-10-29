@@ -17,6 +17,9 @@ from utils.train_utils import task_init
 from train import get_full_input
 
 import matplotlib.pyplot as plt
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, save_plot,
+)
 
 def data_batch_to_device(data_b, device=DEVICE):
     if type(data_b) is torch.Tensor:
@@ -135,7 +138,13 @@ def find_samples(config: NeuralPredictionConfig, alternative_configs, save_path)
                         # Save figure every 10 plots
                         if i_plotted % 10 == 0:
                             plt.tight_layout()
-                            plt.savefig(osp.join(save_path, f'comparison_batch_{fig_idx}.pdf'))
+                            save_plot(
+                                plt.gcf(), osp.join(
+                                    save_path,
+                                    f'comparison_batch_{fig_idx}'
+                                    f'{FIGURE_SUFFIX}',
+                                ),
+                            )
                             plt.close()
                             fig_idx += 1
 

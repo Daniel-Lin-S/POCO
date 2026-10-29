@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import analysis.plots as plots
 from analysis.fit_diagnostics import (
-    EXAMPLE_COUNT, PREDICTION_DIMS, fit_title,
+    CAMPAIGN_FACTORIES, EXAMPLE_COUNT, PREDICTION_DIMS, fit_title,
     pc_label, sample_row_label,
 )
 import itertools
@@ -291,7 +291,10 @@ class NeuralPrediction(TaskFunction):
                     f'{dataset}_{split}_mae', sum_mae / sum_pred_num
                 )
             
-            if is_best and len(self.sample_trials[split]) > 0:
+            if (is_best and
+                    self.config.experiment_name not in
+                    CAMPAIGN_FACTORIES and
+                    self.sample_trials[split]):
                 self.plot_prediction(save_path, split)
 
         if is_best:

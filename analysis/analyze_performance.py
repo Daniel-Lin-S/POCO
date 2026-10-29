@@ -9,6 +9,9 @@ from configs.config_global import FIG_DIR, MICE_BRAIN_AREAS, ZEBRAFISH_BRAIN_ARE
 from datasets.datasets import Zebrafish, Mice
 
 import matplotlib.pyplot as plt
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, save_plot,
+)
 
 def analyze_predictivity(config: NeuralPredictionConfig, phases=['train', 'val', 'test']):
     """
@@ -77,7 +80,11 @@ def analyze_predictivity(config: NeuralPredictionConfig, phases=['train', 'val',
             plt.xlabel('PC')
             plt.ylabel('Contribution of Loss')
             plt.tight_layout()
-            plt.savefig(os.path.join(fig_dir, f'{phase}_PC_loss_contribution.pdf'))
+            save_plot(
+                plt.gcf(), os.path.join(
+                    fig_dir, f'{phase}_PC_loss_contribution{FIGURE_SUFFIX}'
+                ),
+            )
             plt.close()
 
             return_dict['mse_contribution'] = mean_mse / np.sum(mean_mse)
@@ -92,7 +99,11 @@ def analyze_predictivity(config: NeuralPredictionConfig, phases=['train', 'val',
             plt.xlabel('PC')
             plt.ylabel('Improvement over copy baseline')
             plt.tight_layout()
-            plt.savefig(os.path.join(fig_dir, f'{phase}_PC_loss_improvement.pdf'))
+            save_plot(
+                plt.gcf(), os.path.join(
+                    fig_dir, f'{phase}_PC_loss_improvement{FIGURE_SUFFIX}'
+                ),
+            )
             plt.close()
 
             return_dict['mse_improvement'] = (baseline_mse - mean_mse) / baseline_mse
@@ -110,7 +121,12 @@ def analyze_predictivity(config: NeuralPredictionConfig, phases=['train', 'val',
             plt.xlabel('PC')
             plt.ylabel('Improvement over baseline')
             plt.tight_layout()
-            plt.savefig(os.path.join(fig_dir, f'{phase}_PC_loss_improvement_chance.pdf'))
+            save_plot(
+                plt.gcf(), os.path.join(
+                    fig_dir,
+                    f'{phase}_PC_loss_improvement_chance{FIGURE_SUFFIX}'
+                ),
+            )
             plt.close()
 
             return_dict['mse_improvement_chance'] = (baseline_mse - mean_mse) / baseline_mse
@@ -213,7 +229,11 @@ def analyze_predictivity(config: NeuralPredictionConfig, phases=['train', 'val',
         ax.set_ylabel('Mean Absolute Error')
         
         plt.tight_layout()
-        plt.savefig(os.path.join(fig_dir, f'{phase}_time_performance.pdf'))
+        save_plot(
+            plt.gcf(), os.path.join(
+                fig_dir, f'{phase}_time_performance{FIGURE_SUFFIX}'
+            ),
+        )
         plt.close()
 
         return_dict['mean_mse_time'] = mean_mse

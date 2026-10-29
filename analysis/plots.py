@@ -3,11 +3,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 from pathlib import Path
-from textwrap import fill
 
 import seaborn as sns
 
 from configs.config_global import FIG_DIR, MODEL_COLORS
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, TICK_FONT, save_diagnostic, save_plot,
+)
 from collections.abc import Iterable
 
 def get_model_colors(model_list):
@@ -49,7 +51,7 @@ def heatmap_plot(
         plt.ylabel(ylabel, fontsize=fontsize)
 
     if save_dir and fig_name:
-        plt.savefig(os.path.join(save_dir, fig_name + '.pdf'))
+        save_plot(plt.gcf(), os.path.join(save_dir, fig_name + FIGURE_SUFFIX))
     else:
         plt.show()
     plt.close()
@@ -101,7 +103,7 @@ def error_plot(
     y_offsets=None,
     xlim=None,
     ylim=None,
-    suffix='.pdf'
+    suffix=FIGURE_SUFFIX
 ):
     """
     A generic error bar plot
@@ -257,7 +259,7 @@ def error_plot(
 
     save_dir = os.path.join(FIG_DIR, save_dir)
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, f'{fig_name}{suffix}'))
+    save_plot(plt.gcf(), os.path.join(save_dir, f'{fig_name}{suffix}'))
     plt.close()
 
 def errorbar_plot(
@@ -418,7 +420,7 @@ def grouped_plot(
 
     save_dir = os.path.join(FIG_DIR, save_dir)
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, f'{fig_name}.pdf'))
+    save_plot(plt.gcf(), os.path.join(save_dir, f'{fig_name}{FIGURE_SUFFIX}'))
     plt.close()
 
 def scatter_plot(
@@ -472,7 +474,7 @@ def scatter_plot(
 
     save_dir = os.path.join(FIG_DIR, save_dir)
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, f'{fig_name}.pdf'))
+    save_plot(plt.gcf(), os.path.join(save_dir, f'{fig_name}{FIGURE_SUFFIX}'))
     plt.close()
 
 
@@ -529,7 +531,7 @@ def pred_vs_target_plot(
     save_dir: str,
     fig_name: str,
     vertical_line_pos: int | None = None,
-    fontsize: int = 13,
+    fontsize: int = 18,
     legend: bool = True,
     title: str | None = None,
     prediction_color: str = '#E67E22',
@@ -544,11 +546,11 @@ def pred_vs_target_plot(
     save_dir : str
         Absolute fit-local output directory.
     fig_name : str
-        PDF stem within ``save_dir``.
+        Figure stem within ``save_dir``.
     vertical_line_pos : int or None, optional
         First predicted frame, default None.
     fontsize : int, optional
-        Text size, default 13.
+        Minimum axis text size, default 18.
     legend : bool, optional
         Show an external figure legend, default True.
     title : str or None, optional
@@ -579,18 +581,23 @@ def pred_vs_target_plot(
     if not output_dir.is_absolute():
         output_dir = Path(FIG_DIR) / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f'{fig_name}.pdf'
-    sns.set_theme(style='ticks', context='talk', font_scale=0.9)
+    output = output_dir / f'{fig_name}{FIGURE_SUFFIX}'
+    sns.set_theme(style='ticks', context='talk')
     fig, axes = plt.subplots(
         len(data), 1, figsize=(10.0, len(data) * 1.7 + 2.5),
         sharex=True, squeeze=False,
     )
     for index, (prediction, target) in enumerate(data):
         ax = axes[index, 0]
-        ax.plot(target, label='Target', color='#3C4147', linewidth=1.6)
+        ax.plot(
+            target, label='Target', color='#20252b',
+            linewidth=2.2, linestyle='--', marker='o',
+            markerfacecolor='none', markersize=3.5,
+            markevery=4,
+        )
         ax.plot(
             prediction, label='Prediction', color=prediction_color,
-            linewidth=1.6, linestyle='--',
+            linewidth=2.4, linestyle='-',
         )
         if vertical_line_pos is not None:
             ax.axvline(
@@ -600,33 +607,25 @@ def pred_vs_target_plot(
             )
         label = (row_labels[index] if row_labels is not None
                  else f'Example {index + 1}')
-        ax.set_title(label, loc='left', fontsize=fontsize - 1, pad=4)
-        ax.tick_params(axis='both', labelsize=fontsize - 2)
+        ax.set_title(label, loc='left', fontsize=fontsize, pad=4)
+        ax.tick_params(
+            axis='both', labelsize=max(fontsize - 2, TICK_FONT)
+        )
         sns.despine(ax=ax)
     axes[-1, 0].set_xlabel('Time (frames)', fontsize=fontsize)
     fig.supylabel('Neural activity', fontsize=fontsize)
-    lines = 0
-    if title:
-        wrapped = fill(title, width=70)
-        lines = wrapped.count('\n') + 1
-        fig.suptitle(wrapped, y=0.995, fontsize=fontsize + 4)
-    fig.text(
-        0.5, 0.057,
-        'Rows are saved windows; slot numbers are within saved batches.',
-        ha='center', fontsize=fontsize - 2,
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    heading = title or 'Prediction and target by saved window'
+    heading += '\nRows are saved windows; labels identify each example.'
+    pending = output.with_name(
+        f'.{output.stem}.{os.getpid()}.pending{FIGURE_SUFFIX}'
     )
-    if legend:
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        fig.legend(
-            handles, labels, loc='lower center',
-            bbox_to_anchor=(0.5, 0.01), ncol=len(labels),
-            frameon=False, fontsize=fontsize,
-        )
-    top = 0.97 - 0.020 * max(0, lines - 1)
-    fig.tight_layout(rect=(0.03, 0.09, 1, top), h_pad=0.5)
-    pending = output.with_name(f'.{output.name}.{os.getpid()}.pending')
     try:
-        fig.savefig(pending, format='pdf')
+        save_diagnostic(
+            fig, pending, heading,
+            handles if legend else None,
+            labels if legend else None,
+        )
         os.replace(pending, output)
     finally:
         plt.close(fig)

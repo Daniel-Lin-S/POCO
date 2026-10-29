@@ -36,6 +36,7 @@ from analysis.diagnostics.ahrens_fixed_examples import (
     PARAMETER_KINDS, SHARED_HEAD_LAYERS, SUBJECTS,
 )
 from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX,
     LABEL_FONT, SESSION_COLORS, TICK_FONT, save_diagnostic,
 )
 from analysis.session_scaling_extended import subject_errors
@@ -712,8 +713,8 @@ def main() -> None:
     components = component_results(
         selected, torch.device(args.device),
     )
-    distribution_pdf = output / ".parameter_shift.pending.pdf"
-    component_pdf = output / ".component_impact.pending.pdf"
+    distribution_pdf = output / f".parameter_shift.pending{FIGURE_SUFFIX}"
+    component_pdf = output / f".component_impact.pending{FIGURE_SUFFIX}"
     distribution_figure(
         details, summary, selected, distribution_pdf,
     )
@@ -728,10 +729,11 @@ def main() -> None:
         components, output / "forecast_component_impact.csv",
     )
     os.replace(
-        distribution_pdf, output / "parameter_distribution_shift.pdf",
+        distribution_pdf,
+        output / f"parameter_distribution_shift{FIGURE_SUFFIX}",
     )
     os.replace(
-        component_pdf, output / "forecast_component_impact.pdf",
+        component_pdf, output / f"forecast_component_impact{FIGURE_SUFFIX}",
     )
     manifest["parameter_shift_analysis"] = (
         "All six nine-session groups and both seeds; group mean within "

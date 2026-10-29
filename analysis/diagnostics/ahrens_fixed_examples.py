@@ -1,7 +1,7 @@
 """Render matched POCO Ahrens test traces and diagnostic figures.
 
 Input is a completed fixed-reference report with fixed_reference_per_fit.csv.
-Output is a diagnostics/<UTC timestamp> folder with five PDFs, an
+Output is a diagnostics/<UTC timestamp> folder with five figures, an
 effective-offset CSV, and a manifest. Saved fits remain read only.
 """
 
@@ -23,7 +23,7 @@ import torch
 
 from analysis.session_scaling_extended import subject_errors
 from analysis.diagnostics.figure_style import (
-    LABEL_FONT, PANEL_FONT, TICK_FONT, SESSION_COLORS,
+    FIGURE_SUFFIX, LABEL_FONT, PANEL_FONT, TICK_FONT, SESSION_COLORS,
     SESSION_WIDTHS, save_diagnostic,
 )
 from configs.config_global import (
@@ -676,14 +676,14 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=False)
     sns.set_theme(style="ticks", context="talk")
     prediction_figure(
-        windows, predictions, output / "predictions.pdf"
+        windows, predictions, output / f"predictions{FIGURE_SUFFIX}"
     )
-    training_figure(paths, output / "training_dynamics.pdf")
-    weights_figure(paths, output / "shared_mlp_weights.pdf")
-    subject_loss_figure(table, output / "subject_test_loss.pdf")
+    training_figure(paths, output / f"training_dynamics{FIGURE_SUFFIX}")
+    weights_figure(paths, output / f"shared_mlp_weights{FIGURE_SUFFIX}")
+    subject_loss_figure(table, output / f"subject_test_loss{FIGURE_SUFFIX}")
     offset_table = effective_offset_table(paths)
     effective_offset_figure(
-        offset_table, output / "effective_constant_offset.pdf"
+        offset_table, output / f"effective_constant_offset{FIGURE_SUFFIX}"
     )
     offset_table.to_csv(
         output / "effective_constant_offset.csv", index=False

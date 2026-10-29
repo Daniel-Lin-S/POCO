@@ -12,6 +12,9 @@ import numpy as np
 import os
 
 from analysis import plots
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, save_plot,
+)
 from sklearn.cluster import KMeans
 from scipy import signal
 from sklearn.decomposition import PCA
@@ -376,7 +379,11 @@ def process_data_matrix(
             ax.plot(data_dict['PC'][i, t: t + plot_window])
             ax.title.set_text(f'PC {i}, {plot_window}-step window')
         plt.tight_layout()
-        plt.savefig(os.path.join(sub_fig_dir, f'{exp_name}_first_10_PCs.pdf'))
+        save_plot(
+            plt.gcf(), os.path.join(
+                sub_fig_dir, f'{exp_name}_first_10_PCs{FIGURE_SUFFIX}'
+            ),
+        )
         plt.close()
 
         # plot 10 random neurons
@@ -392,9 +399,9 @@ def process_data_matrix(
             ax.plot(normalized[idx, t: t + plot_window])
             ax.title.set_text(f'Neuron {idx}, {plot_window}-step window')
         plt.tight_layout()
-        plt.savefig(
+        save_plot(plt.gcf(),
             os.path.join(
-                sub_fig_dir, f'{exp_name}_10_random_neurons.pdf'
+                sub_fig_dir, f'{exp_name}_10_random_neurons{FIGURE_SUFFIX}'
             )
         )
         plt.close()

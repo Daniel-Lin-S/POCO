@@ -2,7 +2,7 @@
 
 Input is completed hash-named fits with test.txt, progress.txt, and
 per-subject val_best_info.npy/test_best_info.npy error arrays. Output
-under the artifact figure root is two comparison PDFs and CSV tables
+under the artifact figure root is two comparison figures and CSV tables
 for group results, fixed-reference results, and subject membership.
 Source fit artifacts are read only.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from analysis.diagnostics.figure_style import FIGURE_SUFFIX
 from analysis.scaling_plots import plot_scaling_panels
 from analysis.session_scaling import read_group_results, summarize_groups
 from configs.campaigns.ahrens_session_extended import (
@@ -471,7 +472,7 @@ def analyze_ahrens_session_fixed_priority() -> Path:
     Returns
     -------
     pathlib.Path
-        Absolute folder holding fixed-reference tables and PDF.
+        Absolute folder holding fixed-reference tables and figure.
     """
     settings = load_ahrens_session_extended_campaign()
     configs = configs_dict_unpack(ahrens_session_lowpass_extended())
@@ -485,7 +486,7 @@ def analyze_ahrens_session_fixed_priority() -> Path:
     plot_scaling_panels(
         fixed, 'sessions_per_fit', 'Training sessions per fit',
         'Ahrens low-pass 512-PC scaling: fixed subjects 8, 09, 11',
-        root / 'fixed_reference_tests.pdf',
+        root / f'fixed_reference_tests{FIGURE_SUFFIX}',
     )
     print(f'Saved fixed-reference comparison: {root.resolve()}')
     return root
@@ -497,7 +498,7 @@ def analyze_ahrens_session_extended() -> Path:
     Returns
     -------
     pathlib.Path
-        Absolute folder holding group summary and PDF.
+        Absolute folder holding group summary and figure.
     """
     settings = load_ahrens_session_extended_campaign()
     original = summarize_groups(
@@ -513,7 +514,7 @@ def analyze_ahrens_session_extended() -> Path:
     plot_scaling_panels(
         original, 'sessions_per_fit', 'Training sessions per fit',
         'Ahrens low-pass 512-PC scaling: group tests',
-        root / 'original_group_tests.pdf',
+        root / f'original_group_tests{FIGURE_SUFFIX}',
     )
     print(f'Saved original group comparison: {root.resolve()}')
     return root

@@ -1,4 +1,7 @@
 from zapbench import constants
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, save_plot,
+)
 """Check the model performance in Zapbench"""
 
 from connectomics.common import ts_utils
@@ -55,7 +58,7 @@ for context in [4, 256]:
 # plot the results: step ahead vs MAE
 
 import matplotlib.pyplot as plt
-fig_dir = "figures"
+fig_dir = os.path.abspath("figures")
 os.makedirs(fig_dir, exist_ok=True)
 
 BASE_MODEL_COLORS = {
@@ -80,7 +83,7 @@ def plot_mae(avg_mae, sem_mae, context):
 
   ax.legend()
   fig.tight_layout()
-  fig.savefig(os.path.join(fig_dir, f"mae_{context}.pdf"))
+  save_plot(fig, os.path.join(fig_dir, f"mae_{context}{FIGURE_SUFFIX}"))
 
 plot_mae(avg_mae, sem_mae, 4)
 plot_mae(avg_mae, sem_mae, 256)

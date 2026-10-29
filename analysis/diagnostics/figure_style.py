@@ -1,10 +1,12 @@
-"""Shared readable styling and measured layout for diagnostic PDFs.
+"""Shared readable styling and measured layout for figures.
 
 Inputs are Matplotlib figures whose axes are already populated. The saver
 places a wrapped title exactly TITLE_GAP_POINTS above the highest axis
-annotation and an optional legend below all axes. Output is one cropped PDF.
+annotation and an optional legend below all axes. Output follows the
+tracked figure format and PNG resolution in configs/plotting.
 """
 
+import json
 from pathlib import Path
 from textwrap import fill
 
@@ -23,6 +25,70 @@ TITLE_GAP_POINTS = 16
 LEGEND_GAP_POINTS = 14
 TITLE_WRAP = 66
 POINTS_PER_INCH = 72
+FIGURE_CONFIG = (
+    Path(__file__).resolve().parents[2] /
+    'configs' / 'plotting' / 'figure_output.json'
+)
+SUPPORTED_FORMATS = {'png', 'pdf'}
+
+
+def load_figure_output() -> tuple[str, int]:
+    """Read the project-wide output format and PNG resolution.
+
+    Returns
+    -------
+    tuple[str, int]
+        Figure suffix and PNG dots per inch.
+    """
+    with FIGURE_CONFIG.open(encoding='utf-8') as stream:
+        settings = json.load(stream)
+    if (not isinstance(settings, dict) or
+            set(settings) != {'format', 'png_dpi'}):
+        raise ValueError(
+            f'Expected format and png_dpi in {FIGURE_CONFIG}.'
+        )
+    kind = settings['format']
+    dpi = settings['png_dpi']
+    if kind not in SUPPORTED_FORMATS:
+        raise ValueError(
+            f'Figure format must be png or pdf, got {kind!r}.'
+        )
+    if type(dpi) is not int or dpi < 1:
+        raise ValueError(
+            f'PNG DPI must be a positive integer, got {dpi!r}.'
+        )
+    return f'.{kind}', dpi
+
+
+FIGURE_SUFFIX, PNG_DPI = load_figure_output()
+
+
+def save_plot(
+    figure: Figure, path: Path | str, **kwargs: object,
+) -> None:
+    """Save one figure using the configured format and resolution.
+
+    Parameters
+    ----------
+    figure : matplotlib.figure.Figure
+        Figure to serialize.
+    path : pathlib.Path or str
+        Output path with the configured suffix.
+    **kwargs : object
+        Additional Matplotlib save options.
+    """
+    destination = Path(path)
+    if destination.suffix.lstrip('.') not in SUPPORTED_FORMATS:
+        raise ValueError(
+            f'Figure suffix must be png or pdf, got {destination}.'
+        )
+    figure.savefig(
+        destination,
+        dpi=PNG_DPI if destination.suffix == '.png' else None,
+        **kwargs,
+    )
+
+
 SESSION_COLORS = {3: "#80aed1", 9: "#397aaa", 18: "#073b65"}
 SESSION_WIDTHS = {3: 2.4, 9: 3.2, 18: 4.0}
 
@@ -39,7 +105,7 @@ def save_diagnostic(
     figure : matplotlib.figure.Figure
         Figure with fully labeled axes and no figure-level title yet.
     path : pathlib.Path
-        Absolute PDF destination, including a pending PDF when replacing.
+        Absolute configured-format destination, including pending files.
     title : str
         Readable title; explicit newlines are preserved when wrapping.
     handles : list or None, optional
@@ -96,5 +162,7 @@ def save_diagnostic(
     if legend is not None:
         if legend.get_window_extent(renderer).y1 >= bounds.y0:
             raise ValueError("Figure legend overlaps the axes annotations.")
-    figure.savefig(path, bbox_inches="tight", pad_inches=0.12)
+    save_plot(
+        figure, path, bbox_inches="tight", pad_inches=0.12,
+    )
     plt.close(figure)

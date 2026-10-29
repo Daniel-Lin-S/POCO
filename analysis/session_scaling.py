@@ -6,7 +6,7 @@ Input is each complete hash-named fit's ``test.txt`` (TestLoss and
 Output is a unique artifact figure folder with ``summary.csv`` (one
 row per model and session count, seed means and standard errors plus
 per-fit and cohort training-compute summaries) and
-``session_scaling.pdf``. Source fit
+a session-scaling figure. Source fit
 metrics and checkpoints remain in their own immutable directories.
 """
 
@@ -18,6 +18,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 
+from analysis.diagnostics.figure_style import FIGURE_SUFFIX
 from analysis.scaling_plots import plot_scaling_panels
 from configs.campaigns.ahrens_session import load_ahrens_session_campaign
 from configs.config_global import FIG_DIR
@@ -216,7 +217,7 @@ def analyze_ahrens_sessions() -> Path:
     plot_scaling_panels(
         summary, 'sessions_per_fit', 'Training sessions per fit',
         'Ahrens low-pass 512-PC session scaling (six subjects)',
-        root / 'session_scaling.pdf',
+        root / f'session_scaling{FIGURE_SUFFIX}',
     )
     print(f'Saved Ahrens session figures: {root.resolve()}')
     return root

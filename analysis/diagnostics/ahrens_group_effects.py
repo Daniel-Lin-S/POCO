@@ -37,6 +37,7 @@ from analysis.diagnostics.ahrens_parameter_mechanism import (
     decompose, load_checkpoint, save_table, test_segment,
 )
 from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX,
     LABEL_FONT, SESSION_COLORS, TICK_FONT, save_diagnostic,
 )
 from analysis.session_scaling_extended import subject_errors
@@ -742,9 +743,9 @@ def main() -> None:
         impact, "component", "allocated_mse_change",
     )
     sns.set_theme(style="ticks", context="talk")
-    pending_impact = output / ".group_component_impact.pending.pdf"
-    pending_ablation = output / ".fitted_term_removal.pending.pdf"
-    pending_scale = output / ".scale_term_removal.pending.pdf"
+    pending_impact = output / f".group_component_impact.pending{FIGURE_SUFFIX}"
+    pending_ablation = output / f".fitted_term_removal.pending{FIGURE_SUFFIX}"
+    pending_scale = output / f".scale_term_removal.pending{FIGURE_SUFFIX}"
     impact_figure(impact_summary, pending_impact)
     ablation_figure(ablation_summary, pending_ablation)
     scale_ablation_figure(ablation_summary, pending_scale)
@@ -756,13 +757,13 @@ def main() -> None:
     ):
         save_table(data, output / name)
     os.replace(
-        pending_impact, output / "group_component_impact.pdf",
+        pending_impact, output / f"group_component_impact{FIGURE_SUFFIX}",
     )
     os.replace(
-        pending_ablation, output / "fitted_term_removal.pdf",
+        pending_ablation, output / f"fitted_term_removal{FIGURE_SUFFIX}",
     )
     os.replace(
-        pending_scale, output / "scale_term_removal.pdf",
+        pending_scale, output / f"scale_term_removal{FIGURE_SUFFIX}",
     )
     with (output / "manifest.json").open() as stream:
         manifest = json.load(stream)

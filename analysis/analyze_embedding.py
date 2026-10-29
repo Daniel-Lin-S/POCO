@@ -3,6 +3,9 @@ import os
 import torch
 import os.path as osp
 import matplotlib.pyplot as plt
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, save_plot,
+)
 import umap
 
 from analysis.plots import error_plot, grouped_plot, get_model_colors
@@ -128,7 +131,7 @@ def plot_distance_matrices(D_E: np.ndarray, D_C: np.ndarray, names: list, figure
     fig.colorbar(im, ax=ax[1])
 
     plt.tight_layout()
-    plt.savefig(osp.join(figure_dir, figure_name))
+    save_plot(plt.gcf(), osp.join(figure_dir, figure_name))
     plt.close()
 
 def visualize_embedding(cfg: NeuralPredictionConfig, methods: list = ['PCA', 'TSNE', 'UMAP'], sub_dir_name=None):
@@ -205,7 +208,10 @@ def visualize_embedding(cfg: NeuralPredictionConfig, methods: list = ['PCA', 'TS
     if region_ids is not None and dataset_label in ['mice', 'zebrafish']:
         n_classes = len(region_names)
         D_E, D_C = compute_distance_matrix(unit_embed, session_start, region_ids, n_classes)
-        plot_distance_matrices(D_E, D_C, region_names, figure_dir, "distance_matrix.pdf")
+        plot_distance_matrices(
+            D_E, D_C, region_names, figure_dir,
+            f"distance_matrix{FIGURE_SUFFIX}",
+        )
 
         return_dict['unit_D_E'] = D_E
         return_dict['unit_D_C'] = D_C
@@ -245,7 +251,13 @@ def visualize_embedding(cfg: NeuralPredictionConfig, methods: list = ['PCA', 'TS
 
             plt.tight_layout()
             os.makedirs(osp.join(figure_dir, f'session_{i}'), exist_ok=True)
-            plt.savefig(osp.join(figure_dir, f'session_{i}', f'unit_embedding_{method}.pdf'))
+            save_plot(
+                plt.gcf(),
+                osp.join(
+                    figure_dir, f'session_{i}',
+                    f'unit_embedding_{method}{FIGURE_SUFFIX}',
+                ),
+            )
             plt.close()
 
             print(f"Animal {i} unit embedding visualization saved for {method}", flush=True)
@@ -273,7 +285,10 @@ def visualize_embedding(cfg: NeuralPredictionConfig, methods: list = ['PCA', 'TS
     if class_names is not None:
         n_classes = len(class_names)
         D_E, D_C = compute_distance_matrix(sessiom_embed, None, session_classes, n_classes)
-        plot_distance_matrices(D_E, D_C, class_names, figure_dir, "session_distance_matrix.pdf")
+        plot_distance_matrices(
+            D_E, D_C, class_names, figure_dir,
+            f"session_distance_matrix{FIGURE_SUFFIX}",
+        )
 
         return_dict['session_D_E'] = D_E
         return_dict['session_D_C'] = D_C
@@ -293,7 +308,11 @@ def visualize_embedding(cfg: NeuralPredictionConfig, methods: list = ['PCA', 'TS
             plt.legend()
 
         plt.tight_layout()
-        plt.savefig(osp.join(figure_dir, f'session_embedding_{method}.pdf'))
+        save_plot(
+            plt.gcf(), osp.join(
+                figure_dir, f'session_embedding_{method}{FIGURE_SUFFIX}'
+            ),
+        )
         plt.close()
 
     return return_dict
@@ -320,10 +339,16 @@ def analyze_embedding_all_seeds(cfgs, idx, methods=['PCA', 'TSNE', 'UMAP'], sub_
         unit_D_E = np.mean([return_dict['unit_D_E'] for return_dict in return_dict_list], axis=0)
         unit_D_C = np.mean([return_dict['unit_D_C'] for return_dict in return_dict_list], axis=0)
         region_names = return_dict_list[0]['region_names']
-        plot_distance_matrices(unit_D_E, unit_D_C, region_names, figure_dir, "average_distance_matrix.pdf")
+        plot_distance_matrices(
+            unit_D_E, unit_D_C, region_names, figure_dir,
+            f"average_distance_matrix{FIGURE_SUFFIX}",
+        )
 
     if 'session_D_E' in return_dict_list[0]:
         session_D_E = np.mean([return_dict['session_D_E'] for return_dict in return_dict_list], axis=0)
         session_D_C = np.mean([return_dict['session_D_C'] for return_dict in return_dict_list], axis=0)
         class_names = return_dict_list[0]['session_names']
-        plot_distance_matrices(session_D_E, session_D_C, class_names, figure_dir, "average_session_distance_matrix.pdf")
+        plot_distance_matrices(
+            session_D_E, session_D_C, class_names, figure_dir,
+            f"average_session_distance_matrix{FIGURE_SUFFIX}",
+        )

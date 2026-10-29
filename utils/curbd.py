@@ -17,6 +17,7 @@ import numpy.random as npr
 import numpy.linalg
 
 import matplotlib.pyplot as plt
+from analysis.diagnostics.figure_style import save_plot
 from matplotlib.gridspec import GridSpec
 from configs.config_global import FIG_DIR
 from tqdm import tqdm
@@ -593,7 +594,7 @@ def threeRegionSim(number_units=100,
 
         os.makedirs(os.path.join(FIG_DIR, 'sim'), exist_ok=True)
         fig_path = os.path.join(FIG_DIR, 'sim', fig_save_name)
-        fig.savefig(fig_path)
+        save_plot(fig, fig_path)
     return out
 
 

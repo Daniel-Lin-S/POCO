@@ -1,11 +1,11 @@
-"""Refresh Ahrens fit PDFs in place from complete fit artifacts.
+"""Render Ahrens fit figures from complete fit artifacts.
 
 Input is a hash-named fit folder with ``config.json``, ``progress.txt``
 (Epoch, BatchNum, TrainLoss, ValLoss, and split MAE columns), and
 ``train_best_info.npy``, ``val_best_info.npy``, ``test_best_info.npy``
 (each containing ``sample_trials`` as prediction, target, input arrays
-with shape ``(time, batch, PCs)``). Output is ``training_dynamics.pdf``
-and four ``best_dim*.pdf`` files in each existing split prediction folder.
+with shape ``(time, batch, PCs)``). Output is a training-dynamics
+figure and four PC prediction figures per split in the configured format.
 ``fit_figures_complete.json`` records figure hashes for safe backfill.
 Scientific metrics, checkpoints, and ``complete.json`` are read only.
 """
@@ -15,7 +15,6 @@ import json
 import os
 import time
 from pathlib import Path
-from textwrap import fill
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,27 +22,50 @@ import pandas as pd
 import seaborn as sns
 
 from analysis import plots
+from analysis.diagnostics.figure_style import (
+    FIGURE_SUFFIX, LABEL_FONT, PNG_DPI, TICK_FONT,
+    save_diagnostic,
+)
 from configs.configs import NeuralPredictionConfig
 from configs.experiments import (
     ahrens_length_lowpass_four, ahrens_session_lowpass_six,
     ahrens_session_lowpass_extended,
     ahrens_head_sharing_factorial,
     ahrens_input_projection_scaling,
+    ahrens_local_mlp_scaling,
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
 from utils.campaigns.lifecycle import CampaignLog
 
-FIGURE_VERSION = 2
+FIGURE_VERSION = 3
+LEGACY_FIGURE_VERSION = 2
 PREDICTION_DIMS = (0, 20, 50, -1)
 EXAMPLE_COUNT = 10
 WATCH_POLL_SECONDS = 30
-FIGURE_NAMES = (
-    'training_dynamics.pdf',
-    *(f'{phase}_pred_vs_target/best_dim{pc}.pdf'
-      for phase in ('train', 'val', 'test')
-      for pc in PREDICTION_DIMS),
-)
+def figure_names(suffix: str) -> tuple[str, ...]:
+    """Return the diagnostic filenames for one output suffix.
+
+    Parameters
+    ----------
+    suffix : str
+        Figure suffix including its leading dot.
+
+    Returns
+    -------
+    tuple[str, ...]
+        Dynamics and prediction figure paths relative to a fit.
+    """
+    return (
+        f'training_dynamics{suffix}',
+        *(f'{phase}_pred_vs_target/best_dim{pc}{suffix}'
+          for phase in ('train', 'val', 'test')
+          for pc in PREDICTION_DIMS),
+    )
+
+
+FIGURE_NAMES = figure_names(FIGURE_SUFFIX)
+LEGACY_FIGURE_NAMES = figure_names('.pdf')
 CAMPAIGN_FACTORIES = {
     'ahrens_length_lowpass_four': ahrens_length_lowpass_four,
     'ahrens_session_lowpass_six': ahrens_session_lowpass_six,
@@ -56,6 +78,7 @@ CAMPAIGN_FACTORIES = {
     'ahrens_input_projection_scaling': (
         ahrens_input_projection_scaling
     ),
+    'ahrens_local_mlp_scaling': ahrens_local_mlp_scaling,
 }
 
 
@@ -90,6 +113,7 @@ def fit_title(config: NeuralPredictionConfig) -> str:
     if config.experiment_name in (
         'ahrens_head_sharing_factorial',
         'ahrens_input_projection_scaling',
+        'ahrens_local_mlp_scaling',
     ):
         if not label.startswith('zebrafishahrens_pc-'):
             raise ValueError(
@@ -124,6 +148,12 @@ def fit_title(config: NeuralPredictionConfig) -> str:
         )
         policy = ' | ' + ', '.join(
             f'{name} {scope}' for name, scope in names
+        )
+    if config.experiment_name == 'ahrens_local_mlp_scaling':
+        policy = (
+            ' | independent local MLP'
+            if len(subjects) == 1
+            else ' | shared local MLP, private outputs'
         )
     if config.experiment_name == 'ahrens_input_projection_scaling':
         if len(subjects) == 1:
@@ -255,8 +285,8 @@ def _save_training_dynamics(
     table : pandas.DataFrame
         Training rows with Epoch, TrainLoss, ValLoss, and split MAE.
     """
-    sns.set_theme(style='ticks', context='talk', font_scale=0.9)
-    fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.5))
+    sns.set_theme(style='ticks', context='talk')
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7.5))
     label = config.dataset_label[0]
     x = table['Epoch'].to_numpy(dtype=float) + 1
     train_color = plots.get_model_colors([config.model_label])[0]
@@ -269,40 +299,37 @@ def _save_training_dynamics(
         sns.lineplot(
             x=x, y=table[train_column].to_numpy(dtype=float),
             ax=ax, label='Train', color=train_color,
-            linewidth=2.5, linestyle='-', estimator=None,
+            linewidth=3, linestyle='-', estimator=None,
         )
         sns.lineplot(
             x=x, y=table[val_column].to_numpy(dtype=float),
             ax=ax, label='Validation', color='#3C4147',
-            linewidth=2.5, linestyle='--', estimator=None,
+            linewidth=3, linestyle='--', estimator=None,
         )
-        ax.set_ylabel(ylabel, fontsize=14)
-        ax.tick_params(axis='both', labelsize=12)
+        ax.set_ylabel(ylabel, fontsize=LABEL_FONT)
+        ax.tick_params(axis='both', labelsize=TICK_FONT)
         ax.legend().remove()
         sns.despine(ax=ax)
     axes[0].set_xlabel('')
-    axes[-1].set_xlabel('Epoch (one-based)', fontsize=14)
+    axes[-1].set_xlabel(
+        'Epoch (one-based)', fontsize=LABEL_FONT
+    )
     for ax in axes:
         if x[0] == x[-1]:
             ax.set_xlim(x[0] - 0.5, x[0] + 0.5)
         else:
             ax.set_xlim(max(1, x[0]), x[-1])
-    title = fill(
-        f'{fit_title(config)} | Training dynamics', width=68
-    )
-    lines = title.count('\n') + 1
-    fig.suptitle(title, y=0.99, fontsize=17)
+    title = f'{fit_title(config)} | Training dynamics'
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc='lower center',
-        bbox_to_anchor=(0.5, 0.015), ncol=2, frameon=False,
-        fontsize=14,
+    output = (
+        Path(config.save_path) /
+        f'training_dynamics{FIGURE_SUFFIX}'
     )
-    fig.tight_layout(rect=(0, 0.08, 1, 0.96 - 0.025 * (lines - 1)))
-    output = Path(config.save_path) / 'training_dynamics.pdf'
-    pending = output.with_name(f'.{output.name}.{os.getpid()}.pending')
+    pending = output.with_name(
+        f'.{output.stem}.{os.getpid()}.pending{FIGURE_SUFFIX}'
+    )
     try:
-        fig.savefig(pending, format='pdf')
+        save_diagnostic(fig, pending, title, handles, labels)
         os.replace(pending, output)
     finally:
         plt.close(fig)
@@ -398,7 +425,7 @@ def _save_prediction_figures(config: NeuralPredictionConfig) -> None:
 
 
 def figures_complete(config: NeuralPredictionConfig) -> bool:
-    """Validate the independent completion record for fit PDFs.
+    """Validate the independent completion record for fit figures.
 
     Parameters
     ----------
@@ -408,7 +435,7 @@ def figures_complete(config: NeuralPredictionConfig) -> bool:
     Returns
     -------
     bool
-        True when all current-version PDFs match the figure marker.
+        True when all figure files match the completion marker.
     """
     root = Path(config.save_path)
     marker = root / 'fit_figures_complete.json'
@@ -416,9 +443,18 @@ def figures_complete(config: NeuralPredictionConfig) -> bool:
         return False
     try:
         record = json.loads(marker.read_text())
-        if (record['version'] != FIGURE_VERSION or
-                record['fit_id'] != fit_id(config) or
-                set(record['files']) != set(FIGURE_NAMES)):
+        version = record['version']
+        if version == LEGACY_FIGURE_VERSION:
+            expected = LEGACY_FIGURE_NAMES
+        elif version == FIGURE_VERSION:
+            kind = record['format']
+            if kind not in ('png', 'pdf'):
+                return False
+            expected = figure_names(f'.{kind}')
+        else:
+            return False
+        if (record['fit_id'] != fit_id(config) or
+                set(record['files']) != set(expected)):
             return False
         return all(
             (root / name).is_file() and
@@ -430,14 +466,16 @@ def figures_complete(config: NeuralPredictionConfig) -> bool:
 
 
 def render_completed_fit_figures(
-    config: NeuralPredictionConfig,
+    config: NeuralPredictionConfig, force: bool = False,
 ) -> bool:
-    """Refresh in-place PDFs for one validated complete fit.
+    """Render in-place figures for one validated complete fit.
 
     Parameters
     ----------
     config : NeuralPredictionConfig
         Complete fit with saved metrics and sample trials.
+    force : bool, optional
+        Refresh valid figures in their existing format, default False.
 
     Returns
     -------
@@ -447,13 +485,25 @@ def render_completed_fit_figures(
     if not validate_complete(config):
         raise ValueError(f'Cannot plot incomplete fit {config.save_path}.')
     if figures_complete(config):
-        return False
+        if not force:
+            return False
+        record = json.loads(
+            (Path(config.save_path) / 'fit_figures_complete.json')
+            .read_text()
+        )
+        existing_format = record.get('format', 'pdf')
+        if f'.{existing_format}' != FIGURE_SUFFIX:
+            raise ValueError(
+                'Forced refresh cannot convert completed figure formats.'
+            )
     table = _require_dynamics(config)
     _save_training_dynamics(config, table)
     _save_prediction_figures(config)
     root = Path(config.save_path)
     record = {
         'version': FIGURE_VERSION,
+        'format': FIGURE_SUFFIX.lstrip('.'),
+        'png_dpi': PNG_DPI,
         'fit_id': fit_id(config),
         'files': {
             name: file_digest(root / name) for name in FIGURE_NAMES
