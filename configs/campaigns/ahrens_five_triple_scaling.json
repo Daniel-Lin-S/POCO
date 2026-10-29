@@ -1,0 +1,113 @@
+{
+  "filter": "lowpass",
+  "seeds": 3,
+  "max_batch": 10000,
+  "models": [
+    "POCO",
+    "MLP"
+  ],
+  "triples": {
+    "R": [
+      "subject_8",
+      "subject_09",
+      "subject_11"
+    ],
+    "A": [
+      "subject_12",
+      "subject_17",
+      "subject_18"
+    ],
+    "B": [
+      "subject_1",
+      "subject_2",
+      "subject_3"
+    ],
+    "C": [
+      "subject_4",
+      "subject_5",
+      "subject_6"
+    ],
+    "D": [
+      "subject_7",
+      "subject_10",
+      "subject_13"
+    ],
+    "E": [
+      "subject_14",
+      "subject_15",
+      "subject_16"
+    ]
+  },
+  "paths": {
+    "A": [
+      [
+        "RA",
+        "RAB"
+      ],
+      [
+        "AB",
+        "ABE"
+      ],
+      [
+        "AD",
+        "ADE"
+      ]
+    ],
+    "B": [
+      [
+        "RB",
+        "RBC"
+      ],
+      [
+        "AB",
+        "RAB"
+      ],
+      [
+        "BE",
+        "ABE"
+      ]
+    ],
+    "C": [
+      [
+        "RC",
+        "RBC"
+      ],
+      [
+        "CD",
+        "RCD"
+      ],
+      [
+        "CE",
+        "CDE"
+      ]
+    ],
+    "D": [
+      [
+        "AD",
+        "ADE"
+      ],
+      [
+        "CD",
+        "RCD"
+      ],
+      [
+        "DE",
+        "CDE"
+      ]
+    ],
+    "E": [
+      [
+        "BE",
+        "ABE"
+      ],
+      [
+        "CE",
+        "CDE"
+      ],
+      [
+        "DE",
+        "ADE"
+      ]
+    ]
+  }
+}

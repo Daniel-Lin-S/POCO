@@ -1221,3 +1221,41 @@ def compare_pretraining_dataset():
     configs = configure_models(configs)
     configs = configure_dataset(configs)
     return configs
+
+def ahrens_five_triple_scaling() -> dict:
+    """Resolve unique group fits and independent fixed-subject controls.
+
+    Returns
+    -------
+    dict
+        Scientific fits grouped by seed, with existing identities retained.
+    """
+    from configs.campaigns.ahrens_head_sharing import (
+        load_ahrens_five_triple_campaign, five_triple_groups,
+    )
+    from utils.artifacts import fit_id
+
+    settings = load_ahrens_five_triple_campaign()
+    groups = {}
+    for reference in settings['paths']:
+        for group in five_triple_groups(settings, reference):
+            groups[tuple(group)] = group
+    subjects = [s for t in settings['paths']
+                for s in settings['triples'][t]]
+    result = {seed: {} for seed in range(settings['seeds'])}
+    for model in settings['models']:
+        for group in list(groups.values()) + [[s] for s in subjects]:
+            policy = {'poco_sharing': ['full']} if model == 'POCO' else {
+                'output_projection_scope': [
+                    'shared' if len(group) == 1 else 'session'
+                ]
+            }
+            configs = _resolve_ahrens_sharing(
+                dict(settings, model=model),
+                'ahrens_five_triple_scaling',
+                [f"zebrafishahrens_pc-{'+'.join(group)}"], policy,
+            )
+            for seed, items in configs.items():
+                for config in items:
+                    result[seed][fit_id(config)] = config
+    return {seed: list(items.values()) for seed, items in result.items()}

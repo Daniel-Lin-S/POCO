@@ -241,3 +241,65 @@ def load_ahrens_local_mlp_campaign() -> dict:
         set(settings['reference_subjects']),
     )
     return settings
+
+
+def load_ahrens_five_triple_campaign() -> dict:
+    """Read fixed triples and three nested composition paths per triple.
+
+    Returns
+    -------
+    dict
+        Scientific settings, triple membership, and nested group codes.
+    """
+    path = CAMPAIGN_DIR / 'ahrens_five_triple_scaling.json'
+    settings = json.loads(path.read_text())
+    original = load_ahrens_session_extended_campaign()
+    triples = settings['triples']
+    subjects = [s for group in triples.values() for s in group]
+    if (set(triples) != set('RABCDE') or
+            any(len(g) != 3 for g in triples.values()) or
+            len(set(subjects)) != len(subjects) or
+            set(subjects) != set(original['subjects']) or
+            triples['R'] != original['reference_subjects']):
+        raise ValueError('Expected six disjoint established triples.')
+    if (settings['filter'] != 'lowpass' or
+            settings['seeds'] != EXPECTED_SEEDS or
+            settings['max_batch'] != EXPECTED_STEPS or
+            settings['models'] != ['POCO', 'MLP'] or
+            set(settings['paths']) != set('ABCDE')):
+        raise ValueError('Invalid fixed-triple scientific settings.')
+    for reference, paths in settings['paths'].items():
+        if (len(paths) != 3 or
+                len({p[0] for p in paths}) != 3 or
+                len({p[1] for p in paths}) != 3):
+            raise ValueError('Expected three distinct composition paths.')
+        for small, large in paths:
+            if (len(set(small)) != 2 or len(set(large)) != 3 or
+                    not {reference} <= set(small) < set(large) or
+                    not set(large) <= set(triples)):
+                raise ValueError(f'Invalid nested path: {small}, {large}.')
+    return settings
+
+
+def five_triple_groups(settings: dict, reference: str) -> list[list[str]]:
+    """Return canonical 3/6/9/18-session groups for one fixed triple.
+
+    Parameters
+    ----------
+    settings : dict
+        Validated five-triple campaign configuration.
+    reference : str
+        Evaluation triple code, A through E.
+
+    Returns
+    -------
+    list[list[str]]
+        Eight canonical subject groups in increasing size order.
+    """
+    paths = settings['paths'][reference]
+    codes = [reference] + [p[0] for p in paths]
+    codes += [p[1] for p in paths] + ['RABCDE']
+    return [sorted_subject_names([
+        subject for code in group
+        for subject in settings['triples'][code]
+    ]) for group in codes]
