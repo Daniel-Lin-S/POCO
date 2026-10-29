@@ -30,6 +30,16 @@ EVERY shell script should have usage documented at the top of the file.
 
 DO NOT overwhelm documentations at public interfaces (shell scripts, major functions, `README.md` etc.) with heavy technial details -- whch make them unreadable. Only include the MOST BRIEF instructions that user need to know to use the interface or script, while leaving technical details to the documentations in the internal modules.
 
+### Module disentanglement
+
+REDUCE code repeat.
+
+DONT create a completely new module / pipeline for every minor modification to the current experiment pipeline. Try to extend existing modules / functions to support an additional run mode if possible.
+
+But DONT squeeze configurations of different compaigns together.
+
+Creation of new files and modules should ONLY be permitted if all or most steps of the new pipeline is completely different from existing ones in the repository. If there are some steps to reuse from existing modules, please import rather than rewriting.
+
 ## Constraints
 
 NEVER directly remove or modify a previous completed model fit artifacts (checkpoints, csv result tables, etc.). Appending to an incomplete run directory is allowed, but NOT modifying previous rows.
@@ -55,6 +65,10 @@ You should parallelise independent neural fits whenever possible. Independent ex
 - Ensure that you select the minimal level permitted by task independence that doesn't create communication overhead to maximise GPU usage and avoid a single bottleneck holding the entire compaign (e.g., multi-session experiment with weight sharing cannot be parallised at session-level, but session-independent model fitting experiments can)
 
 For multi-stage experiment with cross-stage dependencies, DONT parallelise.
+
+## Computational efficiency
+
+Cache and reuse intermediate results that are shared for multiple times. This includes cleaned neural recordings, features extracted by pre-trained mdoels used for several times, models sharing the same initial stages etc.
 
 ## Configurations and compaign identity
 
@@ -95,5 +109,6 @@ All compaigns SHOULD share the SAME artifact / log saving logics and modules, ra
 - Titles must be wrapped by `textwrap` with suitable width to prevent the title from exceeding boundaries, and title should be kept away from the main figure with at least one line's gap.
 - Print a message after saving a figure, pointing to its file path. If a group of images are plotted, please ONLY print ONE message pointing to their common folder. 
 - Proper units should be added to the x and y axes if applicable. (DONT add units if no unit)
+-  When the figure components have some semantic relationships, e.g., two lines share the same input, while other 2 uses another input type; or the lines has a clear order (e.g., hidden size increases from 1 to 16), you should assign appropriate line / point types and styles (shape, colour, etc.) to reflect these relations rather than randomly assigning styles. Baseline components (e.g., input-independent baseline, naive model, constant prediction) should receive gray colour.
 
 While the plot layout may change across compaigns (e.g., different axis definitions, different number of panels, additional shaded areas, change of line style), the overall figure style (font size, legend position, colours used) should be consistent unless explicitly allowed to change. To that said -- all compaign's plotting codes should inherit from shared plotting modules rather than writing completely fresh modules.
