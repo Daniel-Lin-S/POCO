@@ -1314,6 +1314,24 @@ def analyze_ahrens_input_projection_scaling() -> Path:
     print(f'Saved sharing comparison figures: {output.resolve()}')
     return output
 
+def validate_cross_model_protocol() -> None:
+    """Require identical fixed-subject preprocessing and windows."""
+    reference = configs_dict_unpack(
+        ahrens_input_projection_scaling()
+    )[0]
+    for config in configs_dict_unpack(
+        ahrens_local_mlp_scaling()
+    ):
+        subjects = config.dataset_config[
+            config.dataset_label[0]
+        ].session_ids
+        for subject in REFERENCE:
+            if subject in subjects:
+                require_matching_subject_protocol(
+                    reference, config, subject,
+                )
+
+
 def validate_cross_model_counts(
     first: pd.DataFrame, second: pd.DataFrame,
 ) -> None:
@@ -1485,6 +1503,7 @@ def analyze_ahrens_local_mlp_scaling() -> Path:
     poco_subject = poco_subject.loc[
         poco_subject.policy.isin(('input_only', 'independent'))
     ]
+    validate_cross_model_protocol()
     validate_cross_model_counts(poco_subject, local_subject)
     per_fit = pd.concat(
         [poco_fit, local_fit], ignore_index=True,
