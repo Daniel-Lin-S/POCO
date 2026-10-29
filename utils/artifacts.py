@@ -58,7 +58,8 @@ MODEL_ARCHITECTURE_FIELDS = {
     'mu_std_separate_projs', 'compression_factor', 'conditioning',
     'conditioning_dim', 'conditioning_layers',
     'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope',
-    'poco_sharing', 'freeze_conditioned_net', 'decoder_context_length',
+    'poco_sharing', 'output_projection_scope',
+    'freeze_conditioned_net', 'decoder_context_length',
     'poyo_num_latents', 'latent_session_embedding',
     'unit_embedding_components', 'poyo_query_mode',
     'poyo_output_mode', 'decoder_num_layers', 'decoder_num_heads',
@@ -93,6 +94,7 @@ DECODER_TYPE_FIELDS = {
 EXPOSURE_CAMPAIGNS = {
     'ahrens_head_sharing_factorial',
     'ahrens_input_projection_scaling',
+    'ahrens_local_mlp_scaling',
 }
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
@@ -137,8 +139,11 @@ def active_model_fields(config: dict) -> set[str] | None:
         }
         if decoder_type == 'POYO':
             fields.add('poco_sharing')
-    elif config['separate_projs']:
-        fields |= {'decoder_proj_init'}
+    elif config['conditioning'] == 'none':
+        if decoder_type == 'MLP':
+            fields.add('output_projection_scope')
+        if config['separate_projs']:
+            fields.add('decoder_proj_init')
     return fields
 
 
@@ -165,6 +170,8 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
             result.pop(field, None)
     if result.get('poco_sharing', 'full') == 'full':
         result.pop('poco_sharing', None)
+    if result.get('output_projection_scope', 'shared') == 'shared':
+        result.pop('output_projection_scope', None)
     active_fields = active_model_fields(result)
     if active_fields is not None:
         for field in MODEL_ARCHITECTURE_FIELDS - active_fields:

@@ -479,7 +479,23 @@ class Decoder(nn.Module):
             raise ValueError(
                 'Private head parameters require MLP conditioning.'
             )
-        self._private_head = 'session' in scopes
+        self.output_projection_scope = config.output_projection_scope
+        if self.output_projection_scope not in ('shared', 'session'):
+            raise ValueError(
+                'Output projection scope must be shared or session.'
+            )
+        if (self.output_projection_scope == 'session' and
+                (config.decoder_type != 'MLP' or
+                 config.conditioning != 'none' or
+                 config.separate_projs)):
+            raise ValueError(
+                'Private output projections require an MLP decoder, '
+                'no conditioning, and separate_projs=False.'
+            )
+        self._private_head = (
+            'session' in scopes or
+            self.output_projection_scope == 'session'
+        )
         self.conditioning_dim = config.conditioning_dim
         if config.conditioning == 'mlp':
             self.in_proj = nn.Sequential(
@@ -530,7 +546,12 @@ class Decoder(nn.Module):
             assert self.linear_out_size == config.pred_length, "Not implemented for now"
             assert self.embedding_length == 1, "Not implemented for now"
         elif config.conditioning == 'none':
-            if not self.separate_projs:
+            if self.output_projection_scope == 'session':
+                self.proj = nn.ModuleList([
+                    nn.Linear(self.embedding_dim, self.linear_out_size)
+                    for _ in input_size
+                ])
+            elif not self.separate_projs:
                 self.proj = nn.Linear(self.embedding_dim, self.linear_out_size)
             else:
                 self.proj = nn.ModuleList([BatchedLinear(size, self.embedding_dim, self.linear_out_size, init=config.decoder_proj_init) for size in input_size])
@@ -650,7 +671,8 @@ class Decoder(nn.Module):
                 e = e.repeat(1, d, 1, 1)
 
             if self.conditioning == 'none':
-                if self.separate_projs:
+                if (self.separate_projs or
+                        self.output_projection_scope == 'session'):
                     proj = self.proj[i]
                 else:
                     proj = self.proj
