@@ -95,6 +95,7 @@ EXPOSURE_CAMPAIGNS = {
     'ahrens_head_sharing_factorial',
     'ahrens_input_projection_scaling',
     'ahrens_local_mlp_scaling',
+    'ahrens_five_triple_scaling',
 }
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',

@@ -440,6 +440,7 @@ def model_train(config: NeuralPredictionConfig) -> None:
         'ahrens_head_sharing_factorial',
         'ahrens_input_projection_scaling',
         'ahrens_local_mlp_scaling',
+        'ahrens_five_triple_scaling',
     ):
         label = config.dataset_label[0]
         subjects = config.dataset_config[label].session_ids

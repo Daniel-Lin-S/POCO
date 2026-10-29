@@ -33,6 +33,7 @@ from configs.experiments import (
     ahrens_head_sharing_factorial,
     ahrens_input_projection_scaling,
     ahrens_local_mlp_scaling,
+    ahrens_five_triple_scaling,
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
@@ -79,6 +80,7 @@ CAMPAIGN_FACTORIES = {
         ahrens_input_projection_scaling
     ),
     'ahrens_local_mlp_scaling': ahrens_local_mlp_scaling,
+    'ahrens_five_triple_scaling': ahrens_five_triple_scaling,
 }
 
 
@@ -160,6 +162,13 @@ def fit_title(config: NeuralPredictionConfig) -> str:
             policy = ' | independent single-session'
         elif config.poco_sharing == 'input_only':
             policy = ' | input MLP shared only'
+        else:
+            policy = ' | full sharing'
+    if config.experiment_name == 'ahrens_five_triple_scaling':
+        if len(subjects) == 1:
+            policy = ' | independent single-session'
+        elif config.model_label == 'MLP':
+            policy = ' | shared local MLP, private outputs'
         else:
             policy = ' | full sharing'
     return (
