@@ -40,12 +40,28 @@ FACTOR_BITS = {
     "in_proj": (2, "in_proj_scope"),
     "W_alpha": (4, "alpha_weight_scope"),
 }
+FACTOR_TITLES = {
+    "W_o": r"Output $W_{\mathrm{o}}$",
+    "in_proj": r"Input $W_{\mathrm{in}},\,b_{\mathrm{in}}$",
+    "W_alpha": r"Scale $W_{\alpha}$",
+}
 METRICS = ("test_score", "test_loss")
+METRIC_YLABELS = {
+    "test_score": "Test score",
+    "test_loss": "Test MSE",
+}
+CONTRAST_YLABELS = {
+    "test_score": r"$D_j$ (score)",
+    "test_loss": r"$D_j$ (MSE)",
+}
 EXPECTED_FITS = 96
 SEED_COUNT = 3
 SHARED_COLOR = "#165a83"
 PRIVATE_COLOR = "#c86829"
 CONTRAST_COLOR = "#165a83"
+ZERO_COLOR = "#666666"
+ZERO_LINE_WIDTH = 1.8
+ZERO_LABEL = "0 = equal added-session gain"
 JITTER = (-0.12, 0.0, 0.12)
 
 
@@ -421,11 +437,9 @@ def score_curves(
     path : pathlib.Path
         Absolute PDF output path.
     """
-    ylabel = (
-        "Fixed-reference test score"
-        if metric == "test_score"
-        else "Fixed-reference test MSE (PC activity²)"
-    )
+    if metric not in METRIC_YLABELS:
+        raise ValueError(f"Unknown comparison metric: {metric}.")
+    ylabel = METRIC_YLABELS[metric]
     fig, axes = plt.subplots(1, 3, figsize=(16, 5.6))
     for ax, (name, (bit, _)) in zip(
         axes, FACTOR_BITS.items(),
@@ -459,7 +473,9 @@ def score_curves(
                 SIZES, values, yerr=sem, fmt="none",
                 ecolor=color, capsize=4,
             )
-        ax.set_title(name, fontsize=PANEL_FONT, pad=9)
+        ax.set_title(
+            FACTOR_TITLES[name], fontsize=PANEL_FONT, pad=9
+        )
         ax.set_xticks(SIZES)
         ax.set_xlim(2, 19)
         ax.set_xlabel("Training sessions", fontsize=LABEL_FONT)
@@ -470,8 +486,8 @@ def score_curves(
     handles, labels = axes[0].get_legend_handles_labels()
     save_diagnostic(
         fig, path,
-        "POCO sharing policies | fixed Ahrens test subjects\n"
-        f"{ylabel}; three-seed mean ± SEM",
+        "Fixed-reference Ahrens test: POCO sharing policies\n"
+        "Three-seed mean ± SEM",
         handles, labels,
     )
 
@@ -520,24 +536,26 @@ def contrast_figure(
                     chosen.value, s=35, alpha=0.6,
                     color=CONTRAST_COLOR,
                 )
-            ax.axhline(0, color="#222222", linewidth=1.4)
-            ax.set_title(name, fontsize=PANEL_FONT, pad=9)
+            zero_line = ax.axhline(
+                0, color=ZERO_COLOR, linestyle=":",
+                linewidth=ZERO_LINE_WIDTH,
+            )
+            ax.set_title(
+                FACTOR_TITLES[name], fontsize=PANEL_FONT, pad=9
+            )
             ax.set_xticks(SIZES[1:])
             ax.set_xlim(5, 19)
             ax.set_xlabel("Training sessions", fontsize=LABEL_FONT)
-            ylabel = (
-                "Sharing effect on score gain"
-                if metric == "test_score"
-                else "Sharing effect on MSE reduction\n"
-                     "(PC activity²)"
+            ax.set_ylabel(
+                CONTRAST_YLABELS[metric], fontsize=LABEL_FONT
             )
-            ax.set_ylabel(ylabel, fontsize=LABEL_FONT)
             ax.tick_params(labelsize=TICK_FONT)
             sns.despine(ax=ax)
     save_diagnostic(
         fig, path,
-        "POCO sharing effect on added-session gain\n"
-        "All other tested groups shared; dots: individual seeds",
+        "Fixed-reference scaling: shared minus private gain\n"
+        "Mean ± SEM over three seeds; dots show seeds",
+        [zero_line], [ZERO_LABEL],
     )
 
 
