@@ -24,10 +24,12 @@ from analysis.diagnostics.figure_style import (
 )
 from analysis.session_scaling_extended import (
     fixed_metrics, reference_baselines, subject_errors,
+    require_matching_subject_protocol,
 )
 from configs.config_global import FIG_DIR
 from configs.experiments import (
     ahrens_head_sharing_factorial,
+    ahrens_input_projection_scaling,
     ahrens_session_lowpass_extended,
 )
 from utils.artifacts import fit_id, validate_complete
@@ -99,6 +101,7 @@ HEATMAP_PALETTES = {
     "test_loss": "viridis_r",
 }
 EXPECTED_FITS = 96
+INPUT_COMPARISON_FITS = 57
 SEED_COUNT = 3
 SHARED_COLOR = "#165a83"
 PRIVATE_COLOR = "#c86829"
@@ -196,6 +199,49 @@ def read_exposure(
     ]
 
 
+def fit_resources(config: object) -> dict:
+    """Read training exposure and model cost for one validated fit.
+
+    Parameters
+    ----------
+    config : object
+        Resolved completed POCO fit.
+
+    Returns
+    -------
+    dict
+        Training examples, parameter count, and training-step FLOPs.
+    """
+    progress = pd.read_table(
+        Path(config.save_path) / 'progress.txt'
+    )
+    total = int(progress.TrainExamplesSeen.iloc[-1])
+    label = config.dataset_label[0]
+    expected = (
+        config.max_batch *
+        config.dataset_config[label].batch_size
+    )
+    if total != expected:
+        raise ValueError(
+            f'Expected {expected} training examples, got {total} '
+            f'in {config.save_path}.'
+        )
+    flops = json.loads(
+        (Path(config.save_path) / 'flops.json').read_text()
+    )
+    result = {
+        'train_examples_seen': total,
+        'trainable_parameters': flops['trainable_parameters'],
+        'forward_backward_flops_per_step':
+            flops['forward_backward_flops_per_step'],
+    }
+    if not np.isfinite(list(result.values())).all():
+        raise ValueError(
+            f'Non-finite training resources in {config.save_path}.'
+        )
+    return result
+
+
 def read_fits() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Validate all factorial fits and read fixed-reference metrics.
 
@@ -227,26 +273,15 @@ def read_fits() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             raise ValueError(
                 f"Invalid fixed-reference group: {dataset.session_ids}."
             )
-        progress = pd.read_table(Path(config.save_path) / "progress.txt")
-        total = int(progress.TrainExamplesSeen.iloc[-1])
-        if total != config.max_batch * dataset.batch_size:
-            raise ValueError(
-                f"Expected {config.max_batch * dataset.batch_size} "
-                f"examples, got {total} in {config.save_path}."
-            )
-        flops = json.loads(
-            (Path(config.save_path) / "flops.json").read_text()
-        )
+        resources = fit_resources(config)
+        total = resources['train_examples_seen']
         row = {
             "fit_id": fit_id(config),
             "seed": config.seed,
             "sessions_per_fit": size,
             "private_mask": policy_mask(config),
             "subjects": "+".join(dataset.session_ids),
-            "train_examples_seen": total,
-            "trainable_parameters": flops["trainable_parameters"],
-            "forward_backward_flops_per_step":
-                flops["forward_backward_flops_per_step"],
+            **resources,
             "exposure_detail_available": (
                 (Path(config.save_path) / "exposure.json").is_file()
             ),
@@ -877,4 +912,339 @@ def analyze_ahrens_head_sharing_factorial() -> Path:
     pending_manifest.write_text(json.dumps(manifest, indent=2))
     os.replace(pending_manifest, output / "manifest.json")
     print(f"Saved complete sharing report: {output.resolve()}")
+    return output
+def read_input_projection_fits() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read every validated input-projection comparison fit.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Per-fit metrics/resources and per-subject validation/test errors.
+    """
+    configs = configs_dict_unpack(ahrens_input_projection_scaling())
+    if len(configs) != INPUT_COMPARISON_FITS:
+        raise ValueError(
+            f'Expected {INPUT_COMPARISON_FITS} fits, '
+            f'got {len(configs)}.'
+        )
+    if len({fit_id(config) for config in configs}) != len(configs):
+        raise ValueError('Duplicate input-projection fit identities.')
+    baselines = reference_copy_baselines()
+    reference = set(REFERENCE)
+    rows = []
+    subject_rows = []
+    protocol = {}
+    for config in configs:
+        if not validate_complete(config):
+            raise ValueError(f'Incomplete fit: {config.save_path}.')
+        label = config.dataset_label[0]
+        subjects = config.dataset_config[label].session_ids
+        size = len(subjects)
+        if size not in (1, *SIZES):
+            raise ValueError(
+                f'Unexpected size-{size} group: {subjects}.'
+            )
+        if size > 1 and not reference <= set(subjects):
+            raise ValueError(
+                f'Group omits reference subjects: {subjects}.'
+            )
+        for subject in reference.intersection(subjects):
+            if subject in protocol:
+                require_matching_subject_protocol(
+                    protocol[subject], config, subject,
+                )
+            else:
+                protocol[subject] = config
+        policy = (
+            'independent' if size == 1 else config.poco_sharing
+        )
+        resources = fit_resources(config)
+        row = {
+            'fit_id': fit_id(config),
+            'seed': config.seed,
+            'policy': policy,
+            'sessions_per_fit': size,
+            'subjects': '+'.join(subjects),
+            **resources,
+        }
+        for phase in ('val', 'test'):
+            errors = subject_errors(config, phase)
+            evaluated = subjects if size == 1 else REFERENCE
+            score, loss = fixed_metrics(
+                errors, list(evaluated), baselines[phase],
+            )
+            row[f'{phase}_score'] = score
+            row[f'{phase}_loss'] = loss
+            for subject in evaluated:
+                squared, count = errors[subject]
+                mse = squared / count
+                subject_rows.append({
+                    'fit_id': row['fit_id'],
+                    'seed': config.seed,
+                    'policy': policy,
+                    'sessions_per_fit': size,
+                    'phase': phase,
+                    'subject': subject,
+                    'squared_error': squared,
+                    'prediction_elements': count,
+                    'mse': mse,
+                    'score': 1 - mse / baselines[phase][subject],
+                })
+        rows.append(row)
+    per_fit = pd.DataFrame(rows)
+    per_subject = pd.DataFrame(subject_rows)
+    for table in (per_fit, per_subject):
+        values = table.select_dtypes(
+            include='number'
+        ).to_numpy(dtype=float)
+        if table.empty or not np.isfinite(values).all():
+            raise ValueError('Non-finite input-projection results.')
+    return per_fit, per_subject
+
+
+def summarize_input_projection(
+    per_fit: pd.DataFrame, per_subject: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Aggregate groups within seed, then three independent seeds.
+
+    Parameters
+    ----------
+    per_fit : pandas.DataFrame
+        One row per completed group or singleton fit.
+    per_subject : pandas.DataFrame
+        One row per subject, fit, and evaluation phase.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Seed-level and mean/SEM summaries.
+    """
+    metrics = [
+        'val_score', 'val_loss', 'test_score', 'test_loss'
+    ]
+    groups = per_fit.loc[per_fit.sessions_per_fit > 1]
+    grouped = groups.groupby(
+        ['policy', 'sessions_per_fit', 'seed'],
+        as_index=False,
+    )[metrics].mean()
+    counts = groups.groupby(
+        ['policy', 'sessions_per_fit', 'seed']
+    ).size()
+    expected_counts = {3: 1, 6: 3, 9: 3, 18: 1}
+    for (policy, size, seed), count in counts.items():
+        if count != expected_counts[size]:
+            raise ValueError(
+                f'Expected {expected_counts[size]} groups for '
+                f'{policy}, size {size}, seed {seed}; got {count}.'
+            )
+    singleton = per_subject.loc[
+        per_subject.policy == 'independent'
+    ]
+    if len(singleton) != 3 * SEED_COUNT * 2:
+        raise ValueError(
+            'Expected three singleton subjects per seed and phase.'
+        )
+    baseline_rows = []
+    for seed in range(SEED_COUNT):
+        row = {
+            'policy': 'independent',
+            'sessions_per_fit': 1,
+            'seed': seed,
+        }
+        for phase in ('val', 'test'):
+            subset = singleton.loc[
+                (singleton.seed == seed) &
+                (singleton.phase == phase)
+            ]
+            if set(subset.subject) != set(REFERENCE):
+                raise ValueError(
+                    f'Missing singleton reference for seed {seed}, '
+                    f'{phase}.'
+                )
+            row[f'{phase}_score'] = subset.score.mean()
+            row[f'{phase}_loss'] = (
+                subset.squared_error.sum() /
+                subset.prediction_elements.sum()
+            )
+        baseline_rows.append(row)
+    seed_table = pd.concat(
+        [grouped, pd.DataFrame(baseline_rows)],
+        ignore_index=True,
+    )
+    expected = {
+        (policy, size, seed)
+        for policy in ('full', 'input_only')
+        for size in SIZES for seed in range(SEED_COUNT)
+    } | {
+        ('independent', 1, seed)
+        for seed in range(SEED_COUNT)
+    }
+    actual = set(zip(
+        seed_table.policy, seed_table.sessions_per_fit,
+        seed_table.seed,
+    ))
+    if actual != expected:
+        raise ValueError(
+            f'Incomplete policy-size-seed grid: {expected ^ actual}.'
+        )
+    summary = seed_table.groupby(
+        ['policy', 'sessions_per_fit']
+    )[metrics].agg(['mean', 'std', 'count'])
+    if (summary.xs('count', axis=1, level=1) !=
+            SEED_COUNT).any().any():
+        raise ValueError('Expected three seeds in each policy cell.')
+    means = summary.xs('mean', axis=1, level=1)
+    sem = (
+        summary.xs('std', axis=1, level=1) /
+        np.sqrt(SEED_COUNT)
+    )
+    result = means.reset_index()
+    for metric in metrics:
+        result[f'{metric}_sem'] = sem[metric].to_numpy()
+    if not np.isfinite(
+        result.select_dtypes(include='number').to_numpy()
+    ).all():
+        raise ValueError('Non-finite policy summary.')
+    return seed_table, result
+
+
+def plot_input_projection(
+    summary: pd.DataFrame, metric: str, path: Path,
+) -> None:
+    """Plot three-seed fixed-reference sharing performance.
+
+    Parameters
+    ----------
+    summary : pandas.DataFrame
+        Three-seed means and SEMs by policy and size.
+    metric : str
+        Test score or exact test MSE column.
+    path : pathlib.Path
+        Absolute PDF output destination.
+    """
+    if metric not in METRIC_YLABELS or not path.is_absolute():
+        raise ValueError(
+            f'Expected test metric and absolute path, got '
+            f'{metric}, {path}.'
+        )
+    fig, ax = plt.subplots(figsize=(11, 6.5))
+    styles = (
+        ('full', 'Full POCO sharing', SHARED_COLOR, '-'),
+        ('input_only', 'Input MLP shared only',
+         PRIVATE_COLOR, '--'),
+    )
+    handles = []
+    labels = []
+    for policy, label, color, linestyle in styles:
+        rows = summary.loc[
+            summary.policy == policy
+        ].sort_values('sessions_per_fit')
+        if rows.sessions_per_fit.tolist() != list(SIZES):
+            raise ValueError(
+                f'Missing {policy} session sizes.'
+            )
+        x = rows.sessions_per_fit.to_numpy()
+        y = rows[metric].to_numpy()
+        error = rows[f'{metric}_sem'].to_numpy()
+        line = sns.lineplot(
+            x=x, y=y, color=color, linestyle=linestyle,
+            linewidth=3.2, marker='o', markersize=9,
+            estimator=None, ax=ax,
+        ).lines[-1]
+        ax.errorbar(
+            x, y, yerr=error, fmt='none',
+            ecolor=color, capsize=5, linewidth=2,
+        )
+        handles.append(line)
+        labels.append(label)
+    baseline = summary.loc[
+        summary.policy == 'independent'
+    ]
+    if len(baseline) != 1:
+        raise ValueError('Expected one singleton summary row.')
+    level = float(baseline[metric].iloc[0])
+    error = float(baseline[f'{metric}_sem'].iloc[0])
+    control = ax.axhline(
+        level, color=ZERO_COLOR, linestyle=':',
+        linewidth=2.8,
+    )
+    ax.axhspan(
+        level - error, level + error,
+        color=ZERO_COLOR, alpha=0.12,
+    )
+    handles.append(control)
+    labels.append('Independent single-session POCO')
+    ax.set_xticks(SIZES)
+    ax.set_xlim(2, 19)
+    ax.set_xlabel('Training sessions', fontsize=LABEL_FONT)
+    ax.set_ylabel(METRIC_YLABELS[metric], fontsize=LABEL_FONT)
+    ax.tick_params(labelsize=TICK_FONT)
+    sns.despine(ax=ax)
+    save_diagnostic(
+        fig, path,
+        'Fixed-reference Ahrens test: POCO parameter sharing\n'
+        'Three-seed mean ± SEM; three groups at 6 and 9 sessions',
+        handles, labels,
+    )
+
+
+def analyze_ahrens_input_projection_scaling() -> Path:
+    """Save the complete three-policy Ahrens sharing comparison.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute comparison figure directory.
+    """
+    per_fit, per_subject = read_input_projection_fits()
+    seed_table, summary = summarize_input_projection(
+        per_fit, per_subject,
+    )
+    output = Path(FIG_DIR) / 'ahrens_input_projection_scaling'
+    output.mkdir(parents=True, exist_ok=True)
+    sns.set_theme(style='ticks', context='talk')
+    figures = {
+        'fixed_reference_score.pdf': 'test_score',
+        'fixed_reference_mse.pdf': 'test_loss',
+    }
+    pending = {}
+    try:
+        for name, metric in figures.items():
+            path = output / f'.{name}.pending.pdf'
+            plot_input_projection(summary, metric, path)
+            pending[name] = path
+        for name, table in (
+            ('per_fit.csv', per_fit),
+            ('per_subject.csv', per_subject),
+            ('within_seed.csv', seed_table),
+            ('summary.csv', summary),
+        ):
+            write_table(table, output / name)
+        for name, path in pending.items():
+            os.replace(path, output / name)
+    finally:
+        for path in pending.values():
+            path.unlink(missing_ok=True)
+    manifest = {
+        'fit_count': INPUT_COMPARISON_FITS,
+        'reference_subjects': REFERENCE,
+        'sizes': SIZES,
+        'policies': ('full', 'input_only', 'independent'),
+        'score': 'Equal-subject mean of persistence-normalized scores.',
+        'loss': 'Pooled exact MSE on the fixed reference subjects.',
+        'selection': 'Pooled group validation loss.',
+        'singleton_control': (
+            'Each reference subject has an independent 10000-step '
+            'POCO fit; this control has a larger total update budget '
+            'than one multi-session fit.'
+        ),
+        'aggregation': (
+            'Composition groups averaged within seed; '
+            'mean and SEM across three seeds.'
+        ),
+    }
+    (output / 'manifest.json').write_text(
+        json.dumps(manifest, indent=2) + '\n'
+    )
+    print(f'Saved sharing comparison figures: {output.resolve()}')
     return output
