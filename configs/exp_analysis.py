@@ -720,6 +720,15 @@ def ahrens_single_subject_reference_analysis() -> None:
     add_singleton_reference()
 
 
+def ahrens_local_mlp_scaling_analysis() -> None:
+    """Save the fixed-reference POCO versus local-MLP report."""
+    from analysis.ahrens_head_sharing import (
+        analyze_ahrens_local_mlp_scaling,
+    )
+
+    analyze_ahrens_local_mlp_scaling()
+
+
 def ahrens_input_projection_scaling_analysis() -> None:
     """Save the fixed-reference POCO input-sharing comparison."""
     from analysis.ahrens_head_sharing import (

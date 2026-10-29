@@ -1,10 +1,9 @@
-"""Report the complete nested Ahrens POCO sharing factorial.
+"""Report Ahrens POCO sharing and local-MLP comparisons.
 
-Input is 96 complete scientific fits from the dedicated campaign, plus
-completed reference-subject singleton fits for fixed copy baselines.
-Output under figures/ahrens_head_sharing_factorial is per-fit,
-per-subject, exposure, and factorial-contrast CSVs, six PDFs, and
-manifest.json. Existing model-fit artifacts are read only.
+Inputs are validated fit artifacts from the dedicated Ahrens sharing
+campaigns. Outputs are per-fit, per-subject, exposure, contrast, and
+summary tables with configured-format figures under the artifact root.
+Existing model-fit artifacts are read only.
 """
 
 import json
@@ -20,7 +19,8 @@ import pandas as pd
 import seaborn as sns
 
 from analysis.diagnostics.figure_style import (
-    LABEL_FONT, PANEL_FONT, TICK_FONT, save_diagnostic,
+    FIGURE_SUFFIX, LABEL_FONT, PANEL_FONT, TICK_FONT,
+    save_diagnostic,
 )
 from analysis.session_scaling_extended import (
     fixed_metrics, reference_baselines, subject_errors,
@@ -30,6 +30,7 @@ from configs.config_global import FIG_DIR
 from configs.experiments import (
     ahrens_head_sharing_factorial,
     ahrens_input_projection_scaling,
+    ahrens_local_mlp_scaling,
     ahrens_session_lowpass_extended,
 )
 from utils.artifacts import fit_id, validate_complete
@@ -102,6 +103,8 @@ HEATMAP_PALETTES = {
 }
 EXPECTED_FITS = 96
 INPUT_COMPARISON_FITS = 57
+LOCAL_MLP_FITS = 33
+COMPOSITION_COUNTS = {3: 1, 6: 3, 9: 3, 18: 1}
 SEED_COUNT = 3
 SHARED_COLOR = "#165a83"
 PRIVATE_COLOR = "#c86829"
@@ -850,29 +853,31 @@ def analyze_ahrens_head_sharing_factorial() -> Path:
     output.mkdir(parents=True, exist_ok=True)
     sns.set_theme(style="ticks", context="talk")
     figures = {
-        "comparison_score.pdf": lambda path: score_curves(
+        f"comparison_score{FIGURE_SUFFIX}": lambda path: score_curves(
             per_fit, "test_score", path,
         ),
-        "comparison_loss.pdf": lambda path: score_curves(
+        f"comparison_loss{FIGURE_SUFFIX}": lambda path: score_curves(
             per_fit, "test_loss", path,
         ),
-        "sharing_contrasts.pdf": lambda path: contrast_figure(
+        f"sharing_contrasts{FIGURE_SUFFIX}": lambda path: contrast_figure(
             contrasts, summary, path,
         ),
-        "policy_score_heatmap.pdf": lambda path: policy_heatmap(
+        f"policy_score_heatmap{FIGURE_SUFFIX}": lambda path: policy_heatmap(
             per_fit, "test_score", path,
         ),
-        "policy_mse_heatmap.pdf": lambda path: policy_heatmap(
+        f"policy_mse_heatmap{FIGURE_SUFFIX}": lambda path: policy_heatmap(
             per_fit, "test_loss", path,
         ),
-        "factorial_interactions.pdf": lambda path: contrast_figure(
+        f"factorial_interactions{FIGURE_SUFFIX}": lambda path: contrast_figure(
             contrasts, summary, path, kind="interaction",
         ),
     }
     pending = {}
     try:
         for name, render in figures.items():
-            path = output / f".{name}.pending.pdf"
+            path = output / (
+                f".{Path(name).stem}.pending{FIGURE_SUFFIX}"
+            )
             render(path)
             pending[name] = path
         for name, table in (
@@ -913,22 +918,41 @@ def analyze_ahrens_head_sharing_factorial() -> Path:
     os.replace(pending_manifest, output / "manifest.json")
     print(f"Saved complete sharing report: {output.resolve()}")
     return output
-def read_input_projection_fits() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Read every validated input-projection comparison fit.
+
+
+def read_input_projection_fits(
+    campaign: str = 'poco',
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read validated POCO or local-MLP sharing fits.
+
+    Parameters
+    ----------
+    campaign : str, optional
+        'poco' or 'local_mlp', default 'poco'.
 
     Returns
     -------
     tuple[pandas.DataFrame, pandas.DataFrame]
         Per-fit metrics/resources and per-subject validation/test errors.
     """
-    configs = configs_dict_unpack(ahrens_input_projection_scaling())
-    if len(configs) != INPUT_COMPARISON_FITS:
+    if campaign == 'poco':
+        factory = ahrens_input_projection_scaling
+        expected_count = INPUT_COMPARISON_FITS
+    elif campaign == 'local_mlp':
+        factory = ahrens_local_mlp_scaling
+        expected_count = LOCAL_MLP_FITS
+    else:
+        raise ValueError(f'Unknown sharing campaign: {campaign}.')
+    configs = configs_dict_unpack(factory())
+    if len(configs) != expected_count:
         raise ValueError(
-            f'Expected {INPUT_COMPARISON_FITS} fits, '
+            f'Expected {expected_count} {campaign} fits, '
             f'got {len(configs)}.'
         )
     if len({fit_id(config) for config in configs}) != len(configs):
-        raise ValueError('Duplicate input-projection fit identities.')
+        raise ValueError(
+            f'Duplicate {campaign} fit identities.'
+        )
     baselines = reference_copy_baselines()
     reference = set(REFERENCE)
     rows = []
@@ -955,9 +979,16 @@ def read_input_projection_fits() -> tuple[pd.DataFrame, pd.DataFrame]:
                 )
             else:
                 protocol[subject] = config
-        policy = (
-            'independent' if size == 1 else config.poco_sharing
-        )
+        if campaign == 'local_mlp':
+            policy = (
+                'local_mlp_independent' if size == 1
+                else 'local_mlp'
+            )
+        else:
+            policy = (
+                'independent' if size == 1 else
+                config.poco_sharing
+            )
         resources = fit_resources(config)
         row = {
             'fit_id': fit_id(config),
@@ -998,12 +1029,16 @@ def read_input_projection_fits() -> tuple[pd.DataFrame, pd.DataFrame]:
             include='number'
         ).to_numpy(dtype=float)
         if table.empty or not np.isfinite(values).all():
-            raise ValueError('Non-finite input-projection results.')
+            raise ValueError(
+                f'Non-finite {campaign} results.'
+            )
     return per_fit, per_subject
 
 
 def summarize_input_projection(
     per_fit: pd.DataFrame, per_subject: pd.DataFrame,
+    group_policies: tuple[str, ...] = ('full', 'input_only'),
+    baseline_policies: tuple[str, ...] = ('independent',),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Aggregate groups within seed, then three independent seeds.
 
@@ -1013,6 +1048,10 @@ def summarize_input_projection(
         One row per completed group or singleton fit.
     per_subject : pandas.DataFrame
         One row per subject, fit, and evaluation phase.
+    group_policies : tuple[str, ...], optional
+        Group model labels, default full and input_only.
+    baseline_policies : tuple[str, ...], optional
+        Singleton model labels, default independent.
 
     Returns
     -------
@@ -1030,53 +1069,56 @@ def summarize_input_projection(
     counts = groups.groupby(
         ['policy', 'sessions_per_fit', 'seed']
     ).size()
-    expected_counts = {3: 1, 6: 3, 9: 3, 18: 1}
+    expected_counts = COMPOSITION_COUNTS
     for (policy, size, seed), count in counts.items():
         if count != expected_counts[size]:
             raise ValueError(
                 f'Expected {expected_counts[size]} groups for '
                 f'{policy}, size {size}, seed {seed}; got {count}.'
             )
-    singleton = per_subject.loc[
-        per_subject.policy == 'independent'
-    ]
-    if len(singleton) != 3 * SEED_COUNT * 2:
-        raise ValueError(
-            'Expected three singleton subjects per seed and phase.'
-        )
     baseline_rows = []
-    for seed in range(SEED_COUNT):
-        row = {
-            'policy': 'independent',
-            'sessions_per_fit': 1,
-            'seed': seed,
-        }
-        for phase in ('val', 'test'):
-            subset = singleton.loc[
-                (singleton.seed == seed) &
-                (singleton.phase == phase)
-            ]
-            if set(subset.subject) != set(REFERENCE):
-                raise ValueError(
-                    f'Missing singleton reference for seed {seed}, '
-                    f'{phase}.'
-                )
-            row[f'{phase}_score'] = subset.score.mean()
-            row[f'{phase}_loss'] = (
-                subset.squared_error.sum() /
-                subset.prediction_elements.sum()
+    for policy in baseline_policies:
+        singleton = per_subject.loc[
+            per_subject.policy == policy
+        ]
+        expected_rows = len(REFERENCE) * SEED_COUNT * 2
+        if len(singleton) != expected_rows:
+            raise ValueError(
+                f'Expected {expected_rows} {policy} subject rows.'
             )
-        baseline_rows.append(row)
+        for seed in range(SEED_COUNT):
+            row = {
+                'policy': policy,
+                'sessions_per_fit': 1,
+                'seed': seed,
+            }
+            for phase in ('val', 'test'):
+                subset = singleton.loc[
+                    (singleton.seed == seed) &
+                    (singleton.phase == phase)
+                ]
+                if set(subset.subject) != set(REFERENCE):
+                    raise ValueError(
+                        f'Missing {policy} reference subjects '
+                        f'for seed {seed}, {phase}.'
+                    )
+                row[f'{phase}_score'] = subset.score.mean()
+                row[f'{phase}_loss'] = (
+                    subset.squared_error.sum() /
+                    subset.prediction_elements.sum()
+                )
+            baseline_rows.append(row)
     seed_table = pd.concat(
         [grouped, pd.DataFrame(baseline_rows)],
         ignore_index=True,
     )
     expected = {
         (policy, size, seed)
-        for policy in ('full', 'input_only')
+        for policy in group_policies
         for size in SIZES for seed in range(SEED_COUNT)
     } | {
-        ('independent', 1, seed)
+        (policy, 1, seed)
+        for policy in baseline_policies
         for seed in range(SEED_COUNT)
     }
     actual = set(zip(
@@ -1085,7 +1127,8 @@ def summarize_input_projection(
     ))
     if actual != expected:
         raise ValueError(
-            f'Incomplete policy-size-seed grid: {expected ^ actual}.'
+            f'Incomplete policy-size-seed grid: '
+            f'{expected ^ actual}.'
         )
     summary = seed_table.groupby(
         ['policy', 'sessions_per_fit']
@@ -1110,6 +1153,9 @@ def summarize_input_projection(
 
 def plot_input_projection(
     summary: pd.DataFrame, metric: str, path: Path,
+    styles: tuple[tuple[str, str, str, str], ...] | None = None,
+    baselines: tuple[tuple[str, str, str], ...] | None = None,
+    title: str | None = None,
 ) -> None:
     """Plot three-seed fixed-reference sharing performance.
 
@@ -1120,7 +1166,13 @@ def plot_input_projection(
     metric : str
         Test score or exact test MSE column.
     path : pathlib.Path
-        Absolute PDF output destination.
+        Absolute figure output destination.
+    styles : tuple or None, optional
+        Policy, label, color, and line style, default POCO pair.
+    baselines : tuple or None, optional
+        Singleton policy, label, and line style, default POCO.
+    title : str or None, optional
+        Figure title, default POCO sharing title.
     """
     if metric not in METRIC_YLABELS or not path.is_absolute():
         raise ValueError(
@@ -1128,11 +1180,21 @@ def plot_input_projection(
             f'{metric}, {path}.'
         )
     fig, ax = plt.subplots(figsize=(11, 6.5))
-    styles = (
-        ('full', 'Full POCO sharing', SHARED_COLOR, '-'),
-        ('input_only', 'Input MLP shared only',
-         PRIVATE_COLOR, '--'),
-    )
+    if styles is None:
+        styles = (
+            ('full', 'Full POCO sharing', SHARED_COLOR, '-'),
+            ('input_only', 'Input MLP shared only',
+             PRIVATE_COLOR, '--'),
+        )
+    if baselines is None:
+        baselines = (
+            ('independent', 'Independent single-session POCO', ':'),
+        )
+    if title is None:
+        title = (
+            'Fixed-reference Ahrens test: POCO parameter sharing\n'
+            'Three-seed mean ± SEM; three groups at 6 and 9 sessions'
+        )
     handles = []
     labels = []
     for policy, label, color, linestyle in styles:
@@ -1157,23 +1219,26 @@ def plot_input_projection(
         )
         handles.append(line)
         labels.append(label)
-    baseline = summary.loc[
-        summary.policy == 'independent'
-    ]
-    if len(baseline) != 1:
-        raise ValueError('Expected one singleton summary row.')
-    level = float(baseline[metric].iloc[0])
-    error = float(baseline[f'{metric}_sem'].iloc[0])
-    control = ax.axhline(
-        level, color=ZERO_COLOR, linestyle=':',
-        linewidth=2.8,
-    )
-    ax.axhspan(
-        level - error, level + error,
-        color=ZERO_COLOR, alpha=0.12,
-    )
-    handles.append(control)
-    labels.append('Independent single-session POCO')
+    for policy, label, linestyle in baselines:
+        baseline = summary.loc[
+            summary.policy == policy
+        ]
+        if len(baseline) != 1:
+            raise ValueError(
+                f'Expected one {policy} singleton summary row.'
+            )
+        level = float(baseline[metric].iloc[0])
+        error = float(baseline[f'{metric}_sem'].iloc[0])
+        control = ax.axhline(
+            level, color=ZERO_COLOR, linestyle=linestyle,
+            linewidth=2.8,
+        )
+        ax.axhspan(
+            level - error, level + error,
+            color=ZERO_COLOR, alpha=0.09,
+        )
+        handles.append(control)
+        labels.append(label)
     ax.set_xticks(SIZES)
     ax.set_xlim(2, 19)
     ax.set_xlabel('Training sessions', fontsize=LABEL_FONT)
@@ -1181,10 +1246,8 @@ def plot_input_projection(
     ax.tick_params(labelsize=TICK_FONT)
     sns.despine(ax=ax)
     save_diagnostic(
-        fig, path,
-        'Fixed-reference Ahrens test: POCO parameter sharing\n'
-        'Three-seed mean ± SEM; three groups at 6 and 9 sessions',
-        handles, labels,
+        fig, path, title, handles, labels,
+        legend_columns=2 if len(labels) > 3 else None,
     )
 
 
@@ -1204,13 +1267,15 @@ def analyze_ahrens_input_projection_scaling() -> Path:
     output.mkdir(parents=True, exist_ok=True)
     sns.set_theme(style='ticks', context='talk')
     figures = {
-        'fixed_reference_score.pdf': 'test_score',
-        'fixed_reference_mse.pdf': 'test_loss',
+        f'fixed_reference_score{FIGURE_SUFFIX}': 'test_score',
+        f'fixed_reference_mse{FIGURE_SUFFIX}': 'test_loss',
     }
     pending = {}
     try:
         for name, metric in figures.items():
-            path = output / f'.{name}.pending.pdf'
+            path = output / (
+                f'.{Path(name).stem}.pending{FIGURE_SUFFIX}'
+            )
             plot_input_projection(summary, metric, path)
             pending[name] = path
         for name, table in (
@@ -1247,4 +1312,286 @@ def analyze_ahrens_input_projection_scaling() -> Path:
         json.dumps(manifest, indent=2) + '\n'
     )
     print(f'Saved sharing comparison figures: {output.resolve()}')
+    return output
+
+def validate_cross_model_counts(
+    first: pd.DataFrame, second: pd.DataFrame,
+) -> None:
+    """Require identical fixed-subject prediction counts by split.
+
+    Parameters
+    ----------
+    first : pandas.DataFrame
+        POCO per-subject metrics.
+    second : pandas.DataFrame
+        Local-MLP per-subject metrics.
+    """
+    combined = pd.concat([first, second], ignore_index=True)
+    counts = combined.groupby(
+        ['subject', 'phase']
+    ).prediction_elements.nunique()
+    if (counts != 1).any() or set(counts.index) != {
+        (subject, phase)
+        for subject in REFERENCE
+        for phase in ('val', 'test')
+    }:
+        raise ValueError(
+            'Fixed-reference prediction counts differ between '
+            'POCO and local MLP.'
+        )
+
+
+def local_mlp_gain_contrasts(
+    seed_table: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Contrast added-session gains within each matched seed.
+
+    Parameters
+    ----------
+    seed_table : pandas.DataFrame
+        One row per architecture, size, and seed after group averaging.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Seed-level gains and three-seed mean/SEM contrasts.
+    """
+    lookup = {
+        (row.policy, row.sessions_per_fit, row.seed): row
+        for row in seed_table.itertuples(index=False)
+    }
+    rows = []
+    for seed in range(SEED_COUNT):
+        for size in SIZES[1:]:
+            poco = lookup[('input_only', size, seed)]
+            local = lookup[('local_mlp', size, seed)]
+            poco_base = lookup[('input_only', SIZES[0], seed)]
+            local_base = lookup[('local_mlp', SIZES[0], seed)]
+            score_gain_poco = (
+                poco.test_score - poco_base.test_score
+            )
+            score_gain_local = (
+                local.test_score - local_base.test_score
+            )
+            mse_reduction_poco = (
+                poco_base.test_loss - poco.test_loss
+            )
+            mse_reduction_local = (
+                local_base.test_loss - local.test_loss
+            )
+            rows.append({
+                'seed': seed,
+                'sessions_per_fit': size,
+                'poco_score_gain': score_gain_poco,
+                'local_mlp_score_gain': score_gain_local,
+                'poco_mse_reduction': mse_reduction_poco,
+                'local_mlp_mse_reduction': mse_reduction_local,
+                'score_gain_contrast': (
+                    score_gain_poco - score_gain_local
+                ),
+                'mse_reduction_contrast': (
+                    mse_reduction_poco - mse_reduction_local
+                ),
+            })
+    raw = pd.DataFrame(rows)
+    metrics = (
+        'score_gain_contrast', 'mse_reduction_contrast'
+    )
+    grouped = raw.groupby('sessions_per_fit')[
+        list(metrics)
+    ].agg(['mean', 'std', 'count'])
+    if (grouped.xs('count', axis=1, level=1) !=
+            SEED_COUNT).any().any():
+        raise ValueError('Expected three seeds per gain contrast.')
+    mean = grouped.xs('mean', axis=1, level=1)
+    sem = (
+        grouped.xs('std', axis=1, level=1) /
+        np.sqrt(SEED_COUNT)
+    )
+    summary = mean.reset_index()
+    for metric in metrics:
+        summary[f'{metric}_sem'] = sem[metric].to_numpy()
+    for table in (raw, summary):
+        if not np.isfinite(
+            table.select_dtypes(include='number').to_numpy()
+        ).all():
+            raise ValueError('Non-finite paired gain contrasts.')
+    return raw, summary
+
+
+def plot_local_mlp_gain(
+    contrasts: pd.DataFrame, path: Path,
+) -> None:
+    """Plot POCO minus local-MLP added-session score gain.
+
+    Parameters
+    ----------
+    contrasts : pandas.DataFrame
+        Three-seed mean and SEM at sizes 6, 9, and 18.
+    path : pathlib.Path
+        Absolute configured-format figure destination.
+    """
+    expected_sizes = list(SIZES[1:])
+    rows = contrasts.sort_values('sessions_per_fit')
+    if rows.sessions_per_fit.tolist() != expected_sizes:
+        raise ValueError(
+            f'Expected gain sizes {expected_sizes}.'
+        )
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x = rows.sessions_per_fit.to_numpy()
+    y = rows.score_gain_contrast.to_numpy()
+    sem = rows.score_gain_contrast_sem.to_numpy()
+    sns.lineplot(
+        x=x, y=y, ax=ax, color=SHARED_COLOR,
+        linewidth=3.2, marker='o', markersize=9,
+        estimator=None,
+    )
+    ax.errorbar(
+        x, y, yerr=sem, fmt='none',
+        ecolor=SHARED_COLOR, capsize=5, linewidth=2,
+    )
+    zero = ax.axhline(
+        0, color=ZERO_COLOR, linestyle=':', linewidth=2,
+    )
+    ax.set_xticks(expected_sizes)
+    ax.set_xlim(5, 19)
+    ax.set_xlabel('Training sessions', fontsize=LABEL_FONT)
+    ax.set_ylabel('Score gain difference', fontsize=LABEL_FONT)
+    ax.tick_params(labelsize=TICK_FONT)
+    sns.despine(ax=ax)
+    save_diagnostic(
+        fig, path,
+        'Fixed-reference Ahrens test: POCO minus local MLP\n'
+        'Difference in score gain from 3 sessions; mean ± SEM',
+        [zero], ['0 = equal added-session gain'],
+    )
+
+
+def analyze_ahrens_local_mlp_scaling() -> Path:
+    """Publish the completed POCO versus local-MLP comparison.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute comparison directory.
+    """
+    poco_fit, poco_subject = read_input_projection_fits()
+    local_fit, local_subject = read_input_projection_fits(
+        campaign='local_mlp'
+    )
+    poco_fit = poco_fit.loc[
+        poco_fit.policy.isin(('input_only', 'independent'))
+    ]
+    poco_subject = poco_subject.loc[
+        poco_subject.policy.isin(('input_only', 'independent'))
+    ]
+    validate_cross_model_counts(poco_subject, local_subject)
+    per_fit = pd.concat(
+        [poco_fit, local_fit], ignore_index=True,
+    )
+    per_subject = pd.concat(
+        [poco_subject, local_subject], ignore_index=True,
+    )
+    seed_table, summary = summarize_input_projection(
+        per_fit, per_subject,
+        group_policies=('input_only', 'local_mlp'),
+        baseline_policies=(
+            'independent', 'local_mlp_independent'
+        ),
+    )
+    gain_raw, gain_summary = local_mlp_gain_contrasts(
+        seed_table
+    )
+    exposure = []
+    totals = dict(zip(local_fit.fit_id,
+                      local_fit.train_examples_seen))
+    for config in configs_dict_unpack(
+        ahrens_local_mlp_scaling()
+    ):
+        exposure.extend(read_exposure(
+            config, int(totals[fit_id(config)]),
+        ))
+    exposure_table = pd.DataFrame(exposure)
+    if exposure_table.empty:
+        raise ValueError('No local-MLP exposure records.')
+    output = Path(FIG_DIR) / 'ahrens_local_mlp_comparison'
+    output.mkdir(parents=True, exist_ok=True)
+    sns.set_theme(style='ticks', context='talk')
+    styles = (
+        ('input_only', 'POCO: input MLP shared',
+         SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP shared',
+         PRIVATE_COLOR, '--'),
+    )
+    baselines = (
+        ('independent', 'Independent POCO', ':'),
+        ('local_mlp_independent',
+         'Independent local MLP', '-.'),
+    )
+    title = (
+        'Fixed-reference Ahrens test: POCO and local MLP\n'
+        'Three-seed mean ± SEM; three groups at 6 and 9 sessions'
+    )
+    figures = {
+        f'fixed_reference_score{FIGURE_SUFFIX}': 'test_score',
+        f'fixed_reference_mse{FIGURE_SUFFIX}': 'test_loss',
+    }
+    pending = {}
+    try:
+        for name, metric in figures.items():
+            path = output / (
+                f'.{Path(name).stem}.pending{FIGURE_SUFFIX}'
+            )
+            plot_input_projection(
+                summary, metric, path,
+                styles=styles, baselines=baselines,
+                title=title,
+            )
+            pending[name] = path
+        gain_name = f'score_gain_contrast{FIGURE_SUFFIX}'
+        gain_path = output / (
+            f'.score_gain_contrast.pending{FIGURE_SUFFIX}'
+        )
+        plot_local_mlp_gain(gain_summary, gain_path)
+        pending[gain_name] = gain_path
+        for name, table in (
+            ('local_mlp_per_fit.csv', local_fit),
+            ('local_mlp_per_subject.csv', local_subject),
+            ('local_mlp_exposure.csv', exposure_table),
+            ('within_seed.csv', seed_table),
+            ('summary.csv', summary),
+            ('gain_by_seed.csv', gain_raw),
+            ('gain_summary.csv', gain_summary),
+        ):
+            write_table(table, output / name)
+        for name, path in pending.items():
+            os.replace(path, output / name)
+    finally:
+        for path in pending.values():
+            path.unlink(missing_ok=True)
+    manifest = {
+        'new_fit_count': LOCAL_MLP_FITS,
+        'reference_subjects': REFERENCE,
+        'sizes': SIZES,
+        'companion_report': '../ahrens_input_projection_scaling',
+        'score': 'Equal-subject persistence-normalized score.',
+        'loss': 'Pooled exact MSE on reference subjects.',
+        'selection': 'Pooled group validation loss.',
+        'aggregation': (
+            'Composition groups within seed; three-seed mean '
+            'and SEM. Paired gains subtract each policy size-3 score.'
+        ),
+        'singleton_budget': (
+            'Each independent subject fit has 10000 updates; '
+            'each multi-session fit has 10000 pooled updates.'
+        ),
+        'ablation_limit': (
+            'Local MLP removes both POYO and FiLM; their separate '
+            'effects cannot be identified from this comparison.'
+        ),
+    }
+    (output / 'manifest.json').write_text(
+        json.dumps(manifest, indent=2) + '\n'
+    )
+    print(f'Saved local-MLP comparison figures: {output.resolve()}')
     return output

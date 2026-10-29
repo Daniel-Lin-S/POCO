@@ -35,7 +35,7 @@ PLOTTED_CAMPAIGNS = {
 
 
 def render_fit_figures(config: NeuralPredictionConfig) -> None:
-    """Refresh fit PDFs after scientific completion, if applicable."""
+    """Render fit diagnostics after scientific completion when applicable."""
     if config.experiment_name not in PLOTTED_CAMPAIGNS:
         return
     if (config.experiment_name == 'ahrens_head_sharing_factorial'

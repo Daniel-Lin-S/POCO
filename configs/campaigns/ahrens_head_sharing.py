@@ -1,7 +1,7 @@
 """Validate Ahrens sharing campaign settings.
 
 Input is one dedicated JSON per sharing campaign. Output is validated
-scientific settings with no machine paths. Both campaigns use the same
+scientific settings with no machine paths. The campaigns use the same
 subject-group and fit-resolution rules.
 """
 

@@ -4,7 +4,7 @@ Input is ``config.json`` in a hashed fit directory. Training writes
 ``progress.txt`` with train and validation columns, a validation-selected
 ``net_best.pth``, and ``flops.json``. Final evaluation writes ``test.txt``
 with the same objective on the test split and a validated ``complete.json``.
-The head-sharing campaign also writes ``exposure.json``, mapping each
+Ahrens sharing campaigns also write ``exposure.json``, mapping each
 subject name to its actual training-window presentations.
 """
 
