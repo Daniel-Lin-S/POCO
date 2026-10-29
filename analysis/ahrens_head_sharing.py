@@ -1671,7 +1671,9 @@ def analyze_ahrens_five_triples() -> Path:
         ) in groups]
         baselines = {
             phase: reference_baselines(
-                selected, list(reference), phase, expected_count=6,
+                selected, list(reference), phase, expected_count=(
+                    len(settings['models']) * settings['seeds']
+                ),
             ) for phase in ('val', 'test')
         }
         protocol = {}
@@ -1711,7 +1713,18 @@ def analyze_ahrens_five_triples() -> Path:
         seed_tables.append(seed_table)
         summaries.append(summary)
         prepared.append((code, reference, summary))
+    resources = pd.concat(tables, ignore_index=True).drop_duplicates(
+        'fit_id'
+    ).set_index('fit_id')
+    exposure = []
+    for config in configs:
+        exposure.extend(read_exposure(
+            config, int(resources.loc[fit_id(config), 'train_examples_seen']),
+        ))
+    if not exposure:
+        raise ValueError('No per-subject training exposure records.')
     output.mkdir(parents=True, exist_ok=True)
+    write_table(pd.DataFrame(exposure), output / 'exposure.csv')
     styles = (
         ('full', 'POCO: full sharing', SHARED_COLOR, '-'),
         ('local_mlp', 'Local MLP: private outputs', PRIVATE_COLOR, '--'),
