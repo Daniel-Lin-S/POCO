@@ -3,7 +3,7 @@
 Input is 96 complete scientific fits from the dedicated campaign, plus
 completed reference-subject singleton fits for fixed copy baselines.
 Output under figures/ahrens_head_sharing_factorial is per-fit,
-per-subject, exposure, and factorial-contrast CSVs, three PDFs, and
+per-subject, exposure, and factorial-contrast CSVs, six PDFs, and
 manifest.json. Existing model-fit artifacts are read only.
 """
 
@@ -54,6 +54,50 @@ CONTRAST_YLABELS = {
     "test_score": r"$D_j$ (score)",
     "test_loss": r"$D_j$ (MSE)",
 }
+INTERACTION_YLABELS = {
+    "test_score": r"$I$ (score)",
+    "test_loss": r"$I$ (MSE)",
+}
+INTERACTION_TITLES = {
+    "W_o+in_proj":
+        r"$W_{\mathrm{o}} \times "
+        r"(W_{\mathrm{in}},b_{\mathrm{in}})$",
+    "W_o+W_alpha":
+        r"$W_{\mathrm{o}} \times W_{\alpha}$",
+    "in_proj+W_alpha":
+        r"$(W_{\mathrm{in}},b_{\mathrm{in}})"
+        r" \times W_{\alpha}$",
+    "W_o+in_proj+W_alpha":
+        r"$W_{\mathrm{o}} \times "
+        r"(W_{\mathrm{in}},b_{\mathrm{in}})$"
+        "\n" r"$\times W_{\alpha}$",
+}
+POLICY_ORDER = (0, 1, 2, 4, 3, 5, 6, 7)
+POLICY_LABELS = {
+    0: "All shared",
+    1: r"$W_{\mathrm{o}}$",
+    2: r"$W_{\mathrm{in}},b_{\mathrm{in}}$",
+    4: r"$W_{\alpha}$",
+    3: r"$W_{\mathrm{o}}+(W_{\mathrm{in}},b_{\mathrm{in}})$",
+    5: r"$W_{\mathrm{o}}+W_{\alpha}$",
+    6: r"$(W_{\mathrm{in}},b_{\mathrm{in}})+W_{\alpha}$",
+    7: "All private",
+}
+HEATMAP_MEAN_DIGITS = {
+    "test_score": 3,
+    "test_loss": 2,
+}
+HEATMAP_SEM_DIGITS = {
+    "test_score": 4,
+    "test_loss": 3,
+}
+HEATMAP_SIZE = (14, 11)
+LUMINANCE_WEIGHTS = (0.2126, 0.7152, 0.0722)
+LUMINANCE_THRESHOLD = 0.5
+HEATMAP_PALETTES = {
+    "test_score": "viridis",
+    "test_loss": "viridis_r",
+}
 EXPECTED_FITS = 96
 SEED_COUNT = 3
 SHARED_COLOR = "#165a83"
@@ -62,6 +106,8 @@ CONTRAST_COLOR = "#165a83"
 ZERO_COLOR = "#666666"
 ZERO_LINE_WIDTH = 1.8
 ZERO_LABEL = "0 = equal added-session gain"
+ZERO_INTERACTION_LABEL = "0 = no interaction in scaling gain"
+TRIPLE_INTERACTION_COLOR = "#684c8b"
 JITTER = (-0.12, 0.0, 0.12)
 
 
@@ -492,70 +538,244 @@ def score_curves(
     )
 
 
+def policy_metric_grid(
+    per_fit: pd.DataFrame, metric: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Aggregate the complete eight-policy grid within three seeds.
+
+    Parameters
+    ----------
+    per_fit : pandas.DataFrame
+        One fixed-reference metric per fit, policy, size, and seed.
+    metric : str
+        Saved test_score or test_loss column.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Mean and SEM grids, each with shape (8 policies, 4 sizes).
+    """
+    if metric not in METRICS:
+        raise ValueError(f"Unknown policy metric: {metric}.")
+    expected = pd.MultiIndex.from_product(
+        (POLICY_ORDER, SIZES),
+        names=("private_mask", "sessions_per_fit"),
+    )
+    grouped = per_fit.groupby(
+        ["private_mask", "sessions_per_fit"]
+    )[metric].agg(["mean", "std", "count"])
+    if (set(grouped.index) != set(expected) or
+            (grouped["count"] != SEED_COUNT).any()):
+        raise ValueError(
+            f"Expected three seeds in every policy-size "
+            f"cell for {metric}."
+        )
+    grouped = grouped.reindex(expected)
+    means = grouped["mean"].unstack(
+        "sessions_per_fit"
+    ).loc[list(POLICY_ORDER), list(SIZES)]
+    sem = (
+        grouped["std"] / np.sqrt(SEED_COUNT)
+    ).unstack(
+        "sessions_per_fit"
+    ).loc[list(POLICY_ORDER), list(SIZES)]
+    if not np.isfinite(
+        (means.to_numpy(), sem.to_numpy())
+    ).all():
+        raise ValueError(
+            f"Non-finite policy means or SEMs for {metric}."
+        )
+    return means, sem
+
+
+def policy_heatmap(
+    per_fit: pd.DataFrame, metric: str, path: Path,
+) -> None:
+    """Plot absolute test performance for all eight sharing policies.
+
+    Parameters
+    ----------
+    per_fit : pandas.DataFrame
+        Complete fixed-reference result table with 96 fit rows.
+    metric : str
+        Saved test_score or test_loss column.
+    path : pathlib.Path
+        Absolute PDF output path.
+    """
+    if not path.is_absolute():
+        raise ValueError(f"Expected absolute figure path: {path}.")
+    means, sem = policy_metric_grid(per_fit, metric)
+    mean_digits = HEATMAP_MEAN_DIGITS[metric]
+    sem_digits = HEATMAP_SEM_DIGITS[metric]
+    annotations = np.empty(means.shape, dtype=object)
+    for row in range(means.shape[0]):
+        for column in range(means.shape[1]):
+            value = means.iat[row, column]
+            error = sem.iat[row, column]
+            annotations[row, column] = (
+                f"{value:.{mean_digits}f}\n"
+                f"±{error:.{sem_digits}f}"
+            )
+    fig, ax = plt.subplots(figsize=HEATMAP_SIZE)
+    sns.heatmap(
+        means, annot=annotations, fmt="",
+        cmap=HEATMAP_PALETTES[metric],
+        linewidths=1.2, linecolor="white",
+        cbar_kws={"label": METRIC_YLABELS[metric]},
+        ax=ax,
+    )
+    ax.set_xticklabels(
+        [str(size) for size in SIZES], rotation=0
+    )
+    ax.set_yticklabels(
+        [POLICY_LABELS[mask] for mask in POLICY_ORDER],
+        rotation=0,
+    )
+    ax.set_xlabel("Training sessions", fontsize=LABEL_FONT)
+    ax.set_ylabel("Private parameters", fontsize=LABEL_FONT)
+    ax.tick_params(labelsize=TICK_FONT)
+    mesh = ax.collections[0]
+    for artist, value in zip(
+        ax.texts, means.to_numpy().ravel(),
+    ):
+        rgb = mesh.cmap(mesh.norm(value))[:3]
+        luminance = np.dot(rgb, LUMINANCE_WEIGHTS)
+        artist.set_color(
+            "black" if luminance > LUMINANCE_THRESHOLD
+            else "white"
+        )
+        artist.set_fontsize(TICK_FONT)
+    colorbar = mesh.colorbar
+    colorbar.ax.tick_params(labelsize=TICK_FONT)
+    colorbar.set_label(
+        METRIC_YLABELS[metric], fontsize=LABEL_FONT
+    )
+    save_diagnostic(
+        fig, path,
+        "Fixed-reference Ahrens test: all sharing policies\n"
+        "Cell text: three-seed mean ± SEM; brighter = better",
+    )
+
+
 def contrast_figure(
     raw: pd.DataFrame, summary: pd.DataFrame,
-    path: Path,
+    path: Path, kind: str = "original_context",
 ) -> None:
-    """Plot original-context sharing effects on scaling gain.
+    """Plot sharing effects or higher-order scaling interactions.
 
     Parameters
     ----------
     raw : pandas.DataFrame
         Seed-level factorial contrasts.
     summary : pandas.DataFrame
-        Three-seed summaries.
+        Three-seed means and SEMs.
     path : pathlib.Path
         Absolute PDF output path.
+    kind : str, optional
+        original_context or interaction, default original_context.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
-    for column, name in enumerate(FACTOR_BITS):
+    if kind == "original_context":
+        entries = FACTOR_TITLES
+        ylabel = CONTRAST_YLABELS
+        title = (
+            "Fixed-reference scaling: shared minus private gain\n"
+            "Mean ± SEM over three seeds; dots show seeds"
+        )
+        zero_label = ZERO_LABEL
+    elif kind == "interaction":
+        entries = INTERACTION_TITLES
+        ylabel = INTERACTION_YLABELS
+        title = (
+            "Fixed-reference interactions in added-session gain\n"
+            "Mean ± SEM over three seeds; dots show seeds"
+        )
+        zero_label = ZERO_INTERACTION_LABEL
+    else:
+        raise ValueError(
+            f"Expected original_context or interaction, got {kind}."
+        )
+    fig, axes = plt.subplots(
+        len(METRICS), len(entries),
+        figsize=(5 * len(entries), 9.5),
+        squeeze=False,
+    )
+    for column, (name, panel_title) in enumerate(
+        entries.items()
+    ):
+        triple = kind == "interaction" and name.count("+") == 2
+        color = (
+            TRIPLE_INTERACTION_COLOR if triple
+            else CONTRAST_COLOR
+        )
+        style = "--" if triple else "-"
         for row, metric in enumerate(METRICS):
             ax = axes[row, column]
             selected = summary.loc[
                 (summary.metric == metric) &
-                (summary.contrast == "original_context") &
+                (summary.contrast == kind) &
                 (summary.factors == name)
-            ].set_index("sessions_per_fit").loc[list(SIZES[1:])]
+            ]
+            if (len(selected) != len(SIZES[1:]) or
+                    set(selected.sessions_per_fit) !=
+                    set(SIZES[1:])):
+                raise ValueError(
+                    f"Missing {kind} summary for {name}, {metric}."
+                )
+            selected = selected.set_index(
+                "sessions_per_fit"
+            ).loc[list(SIZES[1:])]
             x = selected.index.to_numpy(dtype=float)
             mean = selected["mean"].to_numpy(dtype=float)
             sem = selected["sem"].to_numpy(dtype=float)
+            if (not np.isfinite((mean, sem)).all() or
+                    np.any(sem < 0)):
+                raise ValueError(
+                    f"Invalid {kind} values for {name}, {metric}."
+                )
             ax.errorbar(
-                x, mean, yerr=sem, color=CONTRAST_COLOR,
-                linewidth=2.8, marker="o", markersize=8,
-                capsize=5,
+                x, mean, yerr=sem, color=color,
+                linestyle=style, linewidth=2.8,
+                marker="o", markersize=8, capsize=5,
             )
             points = raw.loc[
                 (raw.metric == metric) &
-                (raw.contrast == "original_context") &
+                (raw.contrast == kind) &
                 (raw.factors == name)
             ]
-            for seed, offset in zip(range(SEED_COUNT), JITTER):
+            if len(points) != SEED_COUNT * len(SIZES[1:]):
+                raise ValueError(
+                    f"Expected nine seed-level {kind} values "
+                    f"for {name}, {metric}."
+                )
+            for seed, offset in zip(
+                range(SEED_COUNT), JITTER,
+            ):
                 chosen = points.loc[points.seed == seed]
                 ax.scatter(
                     chosen.sessions_per_fit + offset,
                     chosen.value, s=35, alpha=0.6,
-                    color=CONTRAST_COLOR,
+                    color=color,
                 )
             zero_line = ax.axhline(
                 0, color=ZERO_COLOR, linestyle=":",
                 linewidth=ZERO_LINE_WIDTH,
             )
             ax.set_title(
-                FACTOR_TITLES[name], fontsize=PANEL_FONT, pad=9
+                panel_title, fontsize=PANEL_FONT, pad=9
             )
             ax.set_xticks(SIZES[1:])
             ax.set_xlim(5, 19)
-            ax.set_xlabel("Training sessions", fontsize=LABEL_FONT)
+            ax.set_xlabel(
+                "Training sessions", fontsize=LABEL_FONT
+            )
             ax.set_ylabel(
-                CONTRAST_YLABELS[metric], fontsize=LABEL_FONT
+                ylabel[metric], fontsize=LABEL_FONT
             )
             ax.tick_params(labelsize=TICK_FONT)
             sns.despine(ax=ax)
     save_diagnostic(
-        fig, path,
-        "Fixed-reference scaling: shared minus private gain\n"
-        "Mean ± SEM over three seeds; dots show seeds",
-        [zero_line], [ZERO_LABEL],
+        fig, path, title,
+        [zero_line], [zero_label],
     )
 
 
@@ -603,6 +823,15 @@ def analyze_ahrens_head_sharing_factorial() -> Path:
         ),
         "sharing_contrasts.pdf": lambda path: contrast_figure(
             contrasts, summary, path,
+        ),
+        "policy_score_heatmap.pdf": lambda path: policy_heatmap(
+            per_fit, "test_score", path,
+        ),
+        "policy_mse_heatmap.pdf": lambda path: policy_heatmap(
+            per_fit, "test_loss", path,
+        ),
+        "factorial_interactions.pdf": lambda path: contrast_figure(
+            contrasts, summary, path, kind="interaction",
         ),
     }
     pending = {}
