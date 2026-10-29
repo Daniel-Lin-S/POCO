@@ -1,4 +1,4 @@
-"""Validate Ahrens POCO sharing campaign settings.
+"""Validate Ahrens sharing campaign settings.
 
 Input is one dedicated JSON per sharing campaign. Output is validated
 scientific settings with no machine paths. Both campaigns use the same
@@ -18,6 +18,9 @@ FACTORIAL_PATH = CAMPAIGN_DIR / 'ahrens_head_sharing.json'
 INPUT_PROJECTION_PATH = (
     CAMPAIGN_DIR / 'ahrens_input_projection_scaling.json'
 )
+LOCAL_MLP_PATH = (
+    CAMPAIGN_DIR / 'ahrens_local_mlp_scaling.json'
+)
 EXPECTED_SIZES = (3, 6, 9, 18)
 COMPOSITION_COUNTS = {3: 1, 6: 3, 9: 3, 18: 1}
 EXPECTED_SEEDS = 3
@@ -28,6 +31,7 @@ COMPARISON_POLICIES = ['full', 'input_only']
 
 def _load_base(
     path: Path, required: set[str],
+    expected_model: str = 'POCO',
 ) -> tuple[dict, dict]:
     """Read one sharing campaign and validate common settings.
 
@@ -37,6 +41,8 @@ def _load_base(
         Campaign-specific JSON file.
     required : set[str]
         Expected scientific fields.
+    expected_model : str, optional
+        Required model label, default 'POCO'.
 
     Returns
     -------
@@ -51,11 +57,11 @@ def _load_base(
         )
     original = load_ahrens_session_extended_campaign()
     if (settings['filter'] != original['filter'] or
-            settings['model'] != 'POCO' or
+            settings['model'] != expected_model or
             settings['seeds'] != EXPECTED_SEEDS or
             settings['max_batch'] != EXPECTED_STEPS):
         raise ValueError(
-            f'{path.name} requires low-pass POCO, three seeds, '
+            f'{path.name} requires low-pass {expected_model}, three seeds, '
             'and 10000 training steps.'
         )
     return settings, original
@@ -139,6 +145,43 @@ def load_ahrens_head_sharing_campaign() -> dict:
     return settings
 
 
+def _validate_composition_groups(
+    groups: dict, original: dict, reference: set[str],
+) -> None:
+    """Validate the eight shared Ahrens composition groups.
+
+    Parameters
+    ----------
+    groups : dict
+        Campaign groups keyed by session count.
+    original : dict
+        Established extended campaign settings.
+    reference : set[str]
+        Fixed evaluation subjects.
+    """
+    _validate_group_sizes(groups)
+    for size in EXPECTED_SIZES:
+        chosen = groups[str(size)]
+        if (not isinstance(chosen, list) or
+                len(chosen) != COMPOSITION_COUNTS[size]):
+            raise ValueError(
+                f'Expected {COMPOSITION_COUNTS[size]} '
+                f'size-{size} groups.'
+            )
+        for group in chosen:
+            _validate_group(
+                group, size, original['groups'][str(size)],
+                reference,
+            )
+        if len({tuple(group) for group in chosen}) != len(chosen):
+            raise ValueError(f'Duplicate size-{size} groups.')
+    for index in range(COMPOSITION_COUNTS[6]):
+        if not set(groups['6'][index]) <= set(groups['9'][index]):
+            raise ValueError(
+                f'Size-9 path {index} loses size-6 subjects.'
+            )
+
+
 def load_ahrens_input_projection_campaign() -> dict:
     """Validate the three composition paths and policy settings.
 
@@ -161,27 +204,40 @@ def load_ahrens_input_projection_campaign() -> dict:
             'Expected the established reference subjects and '
             'full/input-only sharing policies.'
         )
-    groups = settings['groups']
-    _validate_group_sizes(groups)
-    reference = set(settings['reference_subjects'])
-    for size in EXPECTED_SIZES:
-        chosen = groups[str(size)]
-        if (not isinstance(chosen, list) or
-                len(chosen) != COMPOSITION_COUNTS[size]):
-            raise ValueError(
-                f'Expected {COMPOSITION_COUNTS[size]} '
-                f'size-{size} groups.'
-            )
-        for group in chosen:
-            _validate_group(
-                group, size, original['groups'][str(size)],
-                reference,
-            )
-        if len({tuple(group) for group in chosen}) != len(chosen):
-            raise ValueError(f'Duplicate size-{size} groups.')
-    for index in range(COMPOSITION_COUNTS[6]):
-        if not set(groups['6'][index]) <= set(groups['9'][index]):
-            raise ValueError(
-                f'Size-9 path {index} loses size-6 subjects.'
-            )
+    _validate_composition_groups(
+        settings['groups'], original,
+        set(settings['reference_subjects']),
+    )
+    return settings
+
+
+def load_ahrens_local_mlp_campaign() -> dict:
+    """Validate the local-MLP campaign's separate scientific JSON.
+
+    Returns
+    -------
+    dict
+        Local-MLP groups, subject controls, and training settings.
+    """
+    required = {
+        'filter', 'model', 'seeds', 'max_batch',
+        'reference_subjects', 'groups',
+        'output_projection_scope',
+    }
+    settings, original = _load_base(
+        LOCAL_MLP_PATH, required, expected_model='MLP',
+    )
+    comparison = load_ahrens_input_projection_campaign()
+    if (settings['reference_subjects'] !=
+            comparison['reference_subjects'] or
+            settings['groups'] != comparison['groups'] or
+            settings['output_projection_scope'] != 'session'):
+        raise ValueError(
+            'Local-MLP groups must match the input-sharing '
+            'comparison with private recording output heads.'
+        )
+    _validate_composition_groups(
+        settings['groups'], original,
+        set(settings['reference_subjects']),
+    )
     return settings

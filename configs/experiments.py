@@ -19,6 +19,7 @@ from configs.campaigns.ahrens_session_extended import (
 from configs.campaigns.ahrens_head_sharing import (
     load_ahrens_head_sharing_campaign,
     load_ahrens_input_projection_campaign,
+    load_ahrens_local_mlp_campaign,
 )
 from utils.ahrens_sessions import (
     equal_group_counts, equal_subject_group_labels,
@@ -869,6 +870,26 @@ def _resolve_ahrens_sharing(
     return configure_dataset(configure_models(variants))
 
 
+def _ahrens_composition_labels(settings: dict) -> list[str]:
+    """Return explicit multi-session labels in campaign order.
+
+    Parameters
+    ----------
+    settings : dict
+        Validated campaign with four group sizes.
+
+    Returns
+    -------
+    list[str]
+        Ahrens PC subject-group selectors.
+    """
+    return [
+        f"zebrafishahrens_pc-{'+'.join(group)}"
+        for size in (3, 6, 9, 18)
+        for group in settings['groups'][str(size)]
+    ]
+
+
 def ahrens_input_projection_scaling() -> dict:
     """Resolve full, input-only, and singleton POCO controls.
 
@@ -878,14 +899,7 @@ def ahrens_input_projection_scaling() -> dict:
         Resolved configurations grouped by seed.
     """
     settings = load_ahrens_input_projection_campaign()
-    groups = [
-        group for size in (3, 6, 9, 18)
-        for group in settings['groups'][str(size)]
-    ]
-    group_labels = [
-        f"zebrafishahrens_pc-{'+'.join(group)}"
-        for group in groups
-    ]
+    group_labels = _ahrens_composition_labels(settings)
     singleton_labels = [
         f'zebrafishahrens_pc-{subject}'
         for subject in settings['reference_subjects']
@@ -900,6 +914,34 @@ def ahrens_input_projection_scaling() -> dict:
         ))
     return {
         seed: resolved[0][seed] + resolved[1][seed]
+        for seed in range(settings['seeds'])
+    }
+
+
+def ahrens_local_mlp_scaling() -> dict:
+    """Resolve shared local MLP and independent subject controls.
+
+    Returns
+    -------
+    dict
+        Thirty-three resolved scientific fits grouped by seed.
+    """
+    settings = load_ahrens_local_mlp_campaign()
+    group_labels = _ahrens_composition_labels(settings)
+    singleton_labels = [
+        f'zebrafishahrens_pc-{subject}'
+        for subject in settings['reference_subjects']
+    ]
+    grouped = _resolve_ahrens_sharing(
+        settings, 'ahrens_local_mlp_scaling', group_labels,
+        {'output_projection_scope': ['session']},
+    )
+    independent = _resolve_ahrens_sharing(
+        settings, 'ahrens_local_mlp_scaling', singleton_labels,
+        {'output_projection_scope': ['shared']},
+    )
+    return {
+        seed: grouped[seed] + independent[seed]
         for seed in range(settings['seeds'])
     }
 

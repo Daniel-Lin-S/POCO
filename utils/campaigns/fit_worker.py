@@ -30,6 +30,7 @@ PLOTTED_CAMPAIGNS = {
     'ahrens_session_lowpass_extended',
     'ahrens_head_sharing_factorial',
     'ahrens_input_projection_scaling',
+    'ahrens_local_mlp_scaling',
 }
 
 
