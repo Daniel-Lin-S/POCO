@@ -81,7 +81,7 @@ POLICY_LABELS = {
     3: r"$W_{\mathrm{o}}+(W_{\mathrm{in}},b_{\mathrm{in}})$",
     5: r"$W_{\mathrm{o}}+W_{\alpha}$",
     6: r"$(W_{\mathrm{in}},b_{\mathrm{in}})+W_{\alpha}$",
-    7: "All three private",
+    7: "Output + input + scale",
 }
 HEATMAP_MEAN_DIGITS = {
     "test_score": 3,
