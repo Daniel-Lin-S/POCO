@@ -436,7 +436,10 @@ def model_train(config: NeuralPredictionConfig) -> None:
     duration_min = (time.time() - start_time) / 60
     logging.info('Total training time: %.2f mins', duration_min)
 
-    if config.experiment_name == 'ahrens_head_sharing_factorial':
+    if config.experiment_name in (
+        'ahrens_head_sharing_factorial',
+        'ahrens_input_projection_scaling',
+    ):
         label = config.dataset_label[0]
         subjects = config.dataset_config[label].session_ids
         if (len(subjects) != len(session_examples_seen) or

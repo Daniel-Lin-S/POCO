@@ -58,7 +58,7 @@ MODEL_ARCHITECTURE_FIELDS = {
     'mu_std_separate_projs', 'compression_factor', 'conditioning',
     'conditioning_dim', 'conditioning_layers',
     'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope',
-    'freeze_conditioned_net', 'decoder_context_length',
+    'poco_sharing', 'freeze_conditioned_net', 'decoder_context_length',
     'poyo_num_latents', 'latent_session_embedding',
     'unit_embedding_components', 'poyo_query_mode',
     'poyo_output_mode', 'decoder_num_layers', 'decoder_num_heads',
@@ -89,6 +89,10 @@ DECODER_TYPE_FIELDS = {
         'unit_embedding_components', 'latent_session_embedding',
         'poyo_embedding_only',
     },
+}
+EXPOSURE_CAMPAIGNS = {
+    'ahrens_head_sharing_factorial',
+    'ahrens_input_projection_scaling',
 }
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
@@ -131,6 +135,8 @@ def active_model_fields(config: dict) -> set[str] | None:
             'conditioning_dim', 'conditioning_layers',
             'in_proj_scope', 'alpha_weight_scope', 'out_weight_scope',
         }
+        if decoder_type == 'POYO':
+            fields.add('poco_sharing')
     elif config['separate_projs']:
         fields |= {'decoder_proj_init'}
     return fields
@@ -157,6 +163,8 @@ def scientific_config(config: NeuralPredictionConfig) -> dict:
     ):
         if result.get(field, 'shared') == 'shared':
             result.pop(field, None)
+    if result.get('poco_sharing', 'full') == 'full':
+        result.pop('poco_sharing', None)
     active_fields = active_model_fields(result)
     if active_fields is not None:
         for field in MODEL_ARCHITECTURE_FIELDS - active_fields:
@@ -236,11 +244,13 @@ def validate_complete(config: NeuralPredictionConfig) -> bool:
             return False
         if record['steps'] != config.max_batch:
             return False
+        from utils.config_utils import load_config
+        stored = load_config(str(fit_dir))
+        if fit_id(stored) != record['fit_id']:
+            return False
         required = set(REQUIRED_FILES)
-        if (config.experiment_name == 'ahrens_head_sharing_factorial'
-                and fit_dir.name.startswith(
-                    f'{config.model_label}-'
-                )):
+        if (stored.experiment_name in EXPOSURE_CAMPAIGNS and
+                fit_dir.name.startswith(f'{stored.model_label}-')):
             required.add('exposure.json')
         if set(record['files']) != required:
             return False
@@ -248,9 +258,6 @@ def validate_complete(config: NeuralPredictionConfig) -> bool:
             path = fit_dir / name
             if not path.is_file() or file_digest(path) != expected:
                 return False
-        from utils.config_utils import load_config
-        if fit_id(load_config(str(fit_dir))) != record['fit_id']:
-            return False
         progress = pd.read_table(fit_dir / 'progress.txt')
         test = pd.read_table(fit_dir / 'test.txt')
         required_progress = {
@@ -433,7 +440,7 @@ def mark_complete(config: NeuralPredictionConfig) -> None:
             f'Invalid completion marker already exists: {marker}'
         )
     required = list(REQUIRED_FILES)
-    if config.experiment_name == 'ahrens_head_sharing_factorial':
+    if config.experiment_name in EXPOSURE_CAMPAIGNS:
         required.append('exposure.json')
     files = {name: file_digest(fit_dir / name) for name in required}
     record = {'version': FIT_VERSION, 'fit_id': fit_id(config),

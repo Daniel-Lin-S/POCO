@@ -78,7 +78,19 @@ def get_pretrained_model(model_path, config_path, datum_size=None, eval_mode=Tru
     return model
 
 def model_init(config: BaseConfig, datum_size, unit_type=None):
-    model_class = eval("multi_session_models." + config.model_type)
+    sharing = getattr(config, 'poco_sharing', 'full')
+    if sharing == 'input_only':
+        if (config.model_type != 'Decoder' or
+                config.decoder_type != 'POYO' or
+                config.conditioning != 'mlp'):
+            raise ValueError(
+                'Input-only sharing requires a POCO decoder.'
+            )
+        model_class = multi_session_models.InputSharedDecoder
+    elif sharing == 'full':
+        model_class = eval("multi_session_models." + config.model_type)
+    else:
+        raise ValueError(f'Unknown POCO sharing policy: {sharing}.')
 
     if config.model_type == 'Decoder': # only Decoder might use unit_type infomation
         model = model_class(config, datum_size, unit_type)

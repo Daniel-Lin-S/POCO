@@ -749,6 +749,94 @@ class NetFormer(nn.Module):
 
 from zapbench_scripts.standalone_poco import POCO
 
+class InputSharedDecoder(nn.Module):
+    """Tie the input MLP across otherwise independent POCO decoders.
+
+    Parameters
+    ----------
+    config : NeuralPredictionConfig
+        POCO configuration with input-only sharing.
+    input_size : list[list[int]]
+        Channel counts grouped by dataset and recording.
+    unit_types : list[list[numpy.ndarray]]
+        Unit-type arrays grouped like ``input_size``.
+
+    Notes
+    -----
+    Each subject owns its POYO backbone, normalizer, conditioning
+    projections, output projection, and biases. Inactive decoders are
+    skipped, so their private parameters receive no optimizer update.
+    """
+
+    def __init__(
+        self, config: NeuralPredictionConfig,
+        input_size: list[list[int]],
+        unit_types: list[list[np.ndarray]],
+    ) -> None:
+        super().__init__()
+        sizes = list(itertools.chain.from_iterable(input_size))
+        types = list(itertools.chain.from_iterable(unit_types))
+        if not sizes or len(sizes) != len(types):
+            raise ValueError(
+                'Input-only sharing requires matching nonempty '
+                'recording sizes and unit types.'
+            )
+        if any(scope != 'shared' for scope in (
+            config.in_proj_scope, config.alpha_weight_scope,
+            config.out_weight_scope,
+        )):
+            raise ValueError(
+                'Input-only sharing cannot combine with private '
+                'head-scope flags.'
+            )
+        self.models = nn.ModuleList([
+            Decoder(config, [[size]], [[unit_type]])
+            for size, unit_type in zip(sizes, types)
+        ])
+        shared_input = self.models[0].in_proj
+        for model in self.models[1:]:
+            model.in_proj = shared_input
+        self.pred_length = config.pred_length
+        self.input_size = sizes
+
+    def forward(
+        self, x: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        """Predict each active recording with its own decoder.
+
+        Parameters
+        ----------
+        x : list[torch.Tensor]
+            One ``(context, batch, channels)`` tensor per recording.
+
+        Returns
+        -------
+        list[torch.Tensor]
+            One ``(horizon, batch, channels)`` tensor per recording.
+        """
+        if len(x) != len(self.models):
+            raise ValueError(
+                f'Expected {len(self.models)} recordings, got '
+                f'{len(x)}.'
+            )
+        predictions = []
+        for values, model, channels in zip(
+            x, self.models, self.input_size
+        ):
+            if values.ndim != 3 or values.shape[2] != channels:
+                raise ValueError(
+                    f'Expected input shape (context, batch, '
+                    f'{channels}), got {tuple(values.shape)}.'
+                )
+            if values.shape[1] == 0:
+                predictions.append(values.new_empty(
+                    self.pred_length, 0, channels
+                ))
+            else:
+                predictions.append(model([values])[0])
+        return predictions
+
+
 class POCOtest(POCO):
     """
     Use the standalone version of POCO
