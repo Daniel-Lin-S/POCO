@@ -34,6 +34,7 @@ from configs.experiments import (
     ahrens_input_projection_scaling,
     ahrens_local_mlp_scaling,
     ahrens_five_triple_scaling,
+    ahrens_identity_film_scaling,
 )
 from utils.artifacts import file_digest, fit_id, validate_complete
 from utils.campaigns.claims import fit_claim
@@ -81,6 +82,7 @@ CAMPAIGN_FACTORIES = {
     ),
     'ahrens_local_mlp_scaling': ahrens_local_mlp_scaling,
     'ahrens_five_triple_scaling': ahrens_five_triple_scaling,
+    'ahrens_identity_film_scaling': ahrens_identity_film_scaling,
 }
 
 
@@ -164,6 +166,12 @@ def fit_title(config: NeuralPredictionConfig) -> str:
             policy = ' | input MLP shared only'
         else:
             policy = ' | full sharing'
+    if config.experiment_name == 'ahrens_identity_film_scaling':
+        policy = (
+            ' | independent identity FiLM'
+            if len(subjects) == 1
+            else ' | identity FiLM; private outputs'
+        )
     if config.experiment_name == 'ahrens_five_triple_scaling':
         if len(subjects) == 1:
             policy = ' | independent single-session'
@@ -171,8 +179,13 @@ def fit_title(config: NeuralPredictionConfig) -> str:
             policy = ' | shared local MLP, private outputs'
         else:
             policy = ' | full sharing'
+    model_name = (
+        'Local MLP + identity FiLM'
+        if config.model_label == 'MLPIdentityFiLM'
+        else config.model_label
+    )
     return (
-        f'{config.model_label} | {" ".join(details)} | '
+        f'{model_name} | {" ".join(details)} | '
         f'{cohort} | {exposure}{policy} | '
         f'seed {config.seed}'
     )

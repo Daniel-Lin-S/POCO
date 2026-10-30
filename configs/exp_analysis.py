@@ -1577,3 +1577,12 @@ def ahrens_five_triple_scaling_analysis() -> None:
     from analysis.ahrens_head_sharing import analyze_ahrens_five_triples
 
     analyze_ahrens_five_triples()
+
+
+def ahrens_identity_film_scaling_analysis() -> None:
+    """Render completed identity-FiLM comparison figures."""
+    from analysis.ahrens_head_sharing import (
+        analyze_ahrens_identity_film_scaling,
+    )
+
+    analyze_ahrens_identity_film_scaling()

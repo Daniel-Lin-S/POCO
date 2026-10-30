@@ -932,7 +932,7 @@ def read_input_projection_fits(
     Parameters
     ----------
     campaign : str, optional
-        'poco' or 'local_mlp', default 'poco'.
+        'poco', 'local_mlp', or 'identity_film', default 'poco'.
     configs : list or None, optional
         Explicit resolved fits, default the selected campaign factory.
     reference : tuple[str, ...], optional
@@ -993,7 +993,12 @@ def read_input_projection_fits(
                 )
             else:
                 protocol[subject] = config
-        if campaign == 'local_mlp':
+        if campaign == 'identity_film':
+            policy = (
+                'identity_film_independent' if size == 1
+                else 'identity_film'
+            )
+        elif campaign == 'local_mlp':
             policy = (
                 'local_mlp_independent' if size == 1
                 else 'local_mlp'
@@ -1635,6 +1640,10 @@ def analyze_ahrens_local_mlp_scaling() -> Path:
 
 def summarize_triple_subjects(
     results: pd.DataFrame, reference: tuple[str, ...],
+    group_policies: tuple[str, ...] = ('full', 'local_mlp'),
+    baseline_policies: tuple[str, ...] = (
+        'independent', 'local_mlp_independent',
+    ),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Average composition paths within seed, then summarize seeds.
 
@@ -1644,6 +1653,10 @@ def summarize_triple_subjects(
         One subject, phase, model, fit, and seed per row.
     reference : tuple[str, ...]
         Three fixed evaluation subjects.
+    group_policies : tuple[str, ...], optional
+        Multi-session policy labels, default POCO/local MLP.
+    baseline_policies : tuple[str, ...], optional
+        Matching singleton policy labels.
 
     Returns
     -------
@@ -1653,10 +1666,7 @@ def summarize_triple_subjects(
     keys = [
         'subject', 'phase', 'policy', 'sessions_per_fit', 'seed'
     ]
-    expected_policies = {
-        'full', 'local_mlp', 'independent',
-        'local_mlp_independent',
-    }
+    expected_policies = set(group_policies + baseline_policies)
     if (results.empty or set(results.subject) != set(reference) or
             set(results.phase) != {'val', 'test'} or
             set(results.policy) != expected_policies):
@@ -1676,14 +1686,14 @@ def summarize_triple_subjects(
         (subject, phase, policy, size, seed)
         for subject in reference
         for phase in ('val', 'test')
-        for policy in ('full', 'local_mlp')
+        for policy in group_policies
         for size in SIZES
         for seed in range(SEED_COUNT)
     } | {
         (subject, phase, policy, 1, seed)
         for subject in reference
         for phase in ('val', 'test')
-        for policy in ('independent', 'local_mlp_independent')
+        for policy in baseline_policies
         for seed in range(SEED_COUNT)
     }
     observed = set(seed_means[keys].itertuples(
@@ -1718,6 +1728,8 @@ def summarize_triple_subjects(
 def plot_triple_subjects(
     summary: pd.DataFrame, reference: tuple[str, ...],
     metric: str, path: Path,
+    styles: tuple | None = None,
+    controls: tuple | None = None,
 ) -> None:
     """Plot the three fixed subjects with independent model references.
 
@@ -1731,6 +1743,10 @@ def plot_triple_subjects(
         Test score or test MSE.
     path : pathlib.Path
         Absolute configured-format figure path.
+    styles : tuple or None, optional
+        Multi-session line styles, default POCO/local MLP.
+    controls : tuple or None, optional
+        Singleton reference line styles.
     """
     if metric not in ('score', 'mse') or not path.is_absolute():
         raise ValueError(
@@ -1738,11 +1754,13 @@ def plot_triple_subjects(
             f'{metric}, {path}.'
         )
     fig, axes = plt.subplots(1, len(reference), figsize=(19, 7))
-    styles = (
+    if styles is None:
+        styles = (
         ('full', 'POCO', SHARED_COLOR, '-'),
         ('local_mlp', 'Local MLP', PRIVATE_COLOR, '--'),
     )
-    controls = (
+    if controls is None:
+        controls = (
         ('independent', 'Independent POCO', '#555555', ':'),
         ('local_mlp_independent', 'Independent local MLP',
          '#999999', '-.'),
@@ -1819,30 +1837,24 @@ def plot_triple_subjects(
         fig, path, title, handles, labels, legend_columns=2,
     )
 
-def analyze_ahrens_five_triples() -> Path:
-    """Publish fixed-triple figures after every required fit validates.
+def _analyze_ahrens_triple_models(
+    settings: dict, reference_codes: tuple[str, ...],
+    configs: list, model_specs: tuple,
+    group_policies: tuple[str, ...],
+    baseline_policies: tuple[str, ...],
+    styles: tuple, baseline_styles: tuple,
+    subject_styles: tuple, subject_controls: tuple,
+    output_name: str,
+) -> Path:
+    """Aggregate validated fixed-triple fits and render comparisons.
 
-    Returns
-    -------
-    pathlib.Path
-        Comparison root containing per-triple score/MSE figures and
-        seed summaries, plus shared per-fit and per-subject tables.
-        Groups are averaged within seed; triples are not replicates.
+    Inputs are resolved fit configurations and policy display settings.
+    Outputs are tables and figures in the configured artifact root.
     """
-    from configs.campaigns.ahrens_head_sharing import (
-        load_ahrens_five_triple_campaign, five_triple_groups,
-    )
-    from configs.experiments import ahrens_five_triple_scaling
-
-    settings = load_ahrens_five_triple_campaign()
-    configs = configs_dict_unpack(ahrens_five_triple_scaling())
-    if (len(configs) != FIVE_TRIPLE_FIT_COUNT or
-            len({fit_id(c) for c in configs}) != FIVE_TRIPLE_FIT_COUNT):
-        raise ValueError('Expected 216 unique five-triple fits.')
     for config in configs:
         if not validate_complete(config):
             raise ValueError(f'Incomplete fit: {config.save_path}.')
-    output = Path(FIG_DIR) / 'ahrens_five_triple_scaling'
+    output = Path(FIG_DIR) / output_name
     tables = []
     subject_tables = []
     subject_seed_tables = []
@@ -1850,7 +1862,7 @@ def analyze_ahrens_five_triples() -> Path:
     seed_tables = []
     summaries = []
     prepared = []
-    for code in settings['paths']:
+    for code in reference_codes:
         reference = tuple(settings['triples'][code])
         groups = {tuple(g) for g in five_triple_groups(settings, code)}
         groups.update((s,) for s in reference)
@@ -1860,7 +1872,7 @@ def analyze_ahrens_five_triples() -> Path:
         baselines = {
             phase: reference_baselines(
                 selected, list(reference), phase, expected_count=(
-                    len(settings['models']) * settings['seeds']
+                    len(model_specs) * SEED_COUNT
                 ),
             ) for phase in ('val', 'test')
         }
@@ -1878,7 +1890,7 @@ def analyze_ahrens_five_triples() -> Path:
                     protocol[subject] = config
         fits = []
         errors = []
-        for model, campaign in (('POCO', 'poco'), ('MLP', 'local_mlp')):
+        for model, campaign in model_specs:
             per_fit, per_subject = read_input_projection_fits(
                 campaign=campaign,
                 configs=[c for c in selected if c.model_label == model],
@@ -1890,11 +1902,13 @@ def analyze_ahrens_five_triples() -> Path:
         subject_table = pd.concat(errors, ignore_index=True)
         subject_seed, subject_summary = summarize_triple_subjects(
             subject_table, reference,
+            group_policies=group_policies,
+            baseline_policies=baseline_policies,
         )
         seed_table, summary = summarize_input_projection(
             fit_table, subject_table,
-            group_policies=('full', 'local_mlp'),
-            baseline_policies=('independent', 'local_mlp_independent'),
+            group_policies=group_policies,
+            baseline_policies=baseline_policies,
             reference=reference,
         )
         for table in (
@@ -1923,14 +1937,6 @@ def analyze_ahrens_five_triples() -> Path:
         raise ValueError('No per-subject training exposure records.')
     output.mkdir(parents=True, exist_ok=True)
     write_table(pd.DataFrame(exposure), output / 'exposure.csv')
-    styles = (
-        ('full', 'POCO: full sharing', SHARED_COLOR, '-'),
-        ('local_mlp', 'Local MLP: private outputs', PRIVATE_COLOR, '--'),
-    )
-    baselines_style = (
-        ('independent', 'Independent POCO', ':'),
-        ('local_mlp_independent', 'Independent local MLP', '-.'),
-    )
     sns.set_theme(style='ticks', context='talk')
     for code, reference, summary, subject_summary in prepared:
         folder = output / f'triple_{code}'
@@ -1943,12 +1949,13 @@ def analyze_ahrens_five_triples() -> Path:
         for metric, name in (('test_score', 'score'), ('test_loss', 'mse')):
             plot_input_projection(
                 summary, metric, folder / f'{name}{FIGURE_SUFFIX}',
-                styles=styles, baselines=baselines_style, title=title,
+                styles=styles, baselines=baseline_styles, title=title,
             )
         for metric in ('score', 'mse'):
             plot_triple_subjects(
                 subject_summary, reference, metric,
                 folder / f'per_subject_{metric}{FIGURE_SUFFIX}',
+                styles=subject_styles, controls=subject_controls,
             )
     for name, collection in (
         ('per_fit', tables), ('per_subject', subject_tables),
@@ -1976,8 +1983,119 @@ def analyze_ahrens_five_triples() -> Path:
     (output / 'manifest.json').write_text(
         json.dumps(manifest, indent=2) + '\n'
     )
-    print(f'Saved five-triple comparison: {output.resolve()}')
+    print(f'Saved triple comparison: {output.resolve()}')
     return output
+
+
+
+
+def analyze_ahrens_five_triples() -> Path:
+    """Publish the established five-triple comparison."""
+    from configs.campaigns.ahrens_head_sharing import (
+        load_ahrens_five_triple_campaign,
+    )
+    from configs.experiments import ahrens_five_triple_scaling
+
+    settings = load_ahrens_five_triple_campaign()
+    configs = configs_dict_unpack(ahrens_five_triple_scaling())
+    if (len(configs) != FIVE_TRIPLE_FIT_COUNT or
+            len({fit_id(c) for c in configs}) != FIVE_TRIPLE_FIT_COUNT):
+        raise ValueError('Expected 216 unique five-triple fits.')
+    styles = (
+        ('full', 'POCO: full sharing', SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP: private outputs',
+         PRIVATE_COLOR, '--'),
+    )
+    baselines = (
+        ('independent', 'Independent POCO', ':'),
+        ('local_mlp_independent', 'Independent local MLP', '-.'),
+    )
+    subject_styles = (
+        ('full', 'POCO', SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP', PRIVATE_COLOR, '--'),
+    )
+    subject_controls = (
+        ('independent', 'Independent POCO', '#555555', ':'),
+        ('local_mlp_independent', 'Independent local MLP',
+         '#999999', '-.'),
+    )
+    return _analyze_ahrens_triple_models(
+        settings, tuple(settings['paths']), configs,
+        (('POCO', 'poco'), ('MLP', 'local_mlp')),
+        ('full', 'local_mlp'),
+        ('independent', 'local_mlp_independent'),
+        styles, baselines, subject_styles, subject_controls,
+        'ahrens_five_triple_scaling',
+    )
+
+
+def analyze_ahrens_identity_film_scaling() -> Path:
+    """Compare POCO, local MLP, and identity-FiLM local MLP."""
+    from configs.campaigns.ahrens_head_sharing import (
+        five_triple_groups, load_ahrens_five_triple_campaign,
+        load_ahrens_identity_film_campaign,
+    )
+    from configs.experiments import (
+        ahrens_five_triple_scaling, ahrens_identity_film_scaling,
+    )
+
+    settings = load_ahrens_identity_film_campaign()
+    parent = load_ahrens_five_triple_campaign()
+    groups = {
+        tuple(group)
+        for code in settings['reference_triples']
+        for group in five_triple_groups(parent, code)
+    }
+    subjects = {
+        subject for code in settings['reference_triples']
+        for subject in parent['triples'][code]
+    }
+    existing = configs_dict_unpack(ahrens_five_triple_scaling())
+    selected = [
+        config for config in existing
+        if (tuple(config.dataset_config[
+            config.dataset_label[0]
+        ].session_ids) in groups or
+            tuple(config.dataset_config[
+                config.dataset_label[0]
+            ].session_ids) in {(subject,) for subject in subjects})
+    ]
+    new = configs_dict_unpack(ahrens_identity_film_scaling())
+    configs = selected + new
+    if (len(new) != 54 or len(selected) != 108 or
+            len({fit_id(c) for c in configs}) != 162):
+        raise ValueError('Expected 162 distinct three-model fits.')
+    styles = (
+        ('full', 'Full POCO', SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP', PRIVATE_COLOR, '--'),
+        ('identity_film', 'Local MLP + identity FiLM',
+         '#28856a', '-.'),
+    )
+    baselines = (
+        ('independent', 'Independent POCO', ':'),
+        ('local_mlp_independent', 'Independent local MLP', '--'),
+        ('identity_film_independent',
+         'Independent identity-FiLM local MLP', '-.'),
+    )
+    subject_controls = (
+        ('independent', 'Independent POCO', '#444444', ':'),
+        ('local_mlp_independent', 'Independent local MLP',
+         '#777777', '--'),
+        ('identity_film_independent',
+         'Independent identity-FiLM local MLP',
+         '#aaaaaa', '-.'),
+    )
+    report_settings = dict(parent, identity_film=settings)
+    return _analyze_ahrens_triple_models(
+        report_settings, tuple(settings['reference_triples']), configs,
+        (('POCO', 'poco'), ('MLP', 'local_mlp'),
+         ('MLPIdentityFiLM', 'identity_film')),
+        ('full', 'local_mlp', 'identity_film'),
+        ('independent', 'local_mlp_independent',
+         'identity_film_independent'),
+        styles, baselines, styles, subject_controls,
+        'ahrens_identity_film_scaling',
+    )
 
 
 def refresh_ahrens_five_triple_subject_figures() -> Path:
