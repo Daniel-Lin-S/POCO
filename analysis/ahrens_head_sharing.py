@@ -1978,3 +1978,80 @@ def analyze_ahrens_five_triples() -> Path:
     )
     print(f'Saved five-triple comparison: {output.resolve()}')
     return output
+
+
+def refresh_ahrens_five_triple_subject_figures() -> Path:
+    """Render subject panels from the completed campaign result table.
+
+    Returns
+    -------
+    pathlib.Path
+        Comparison root with subject plots and derived seed tables.
+    """
+    from configs.campaigns.ahrens_head_sharing import (
+        load_ahrens_five_triple_campaign,
+    )
+
+    output = Path(FIG_DIR) / 'ahrens_five_triple_scaling'
+    manifest_path = output / 'manifest.json'
+    results_path = output / 'per_subject.csv'
+    if not manifest_path.is_file() or not results_path.is_file():
+        raise FileNotFoundError(
+            f'Completed comparison manifest and subjects required '
+            f'in {output}.'
+        )
+    settings = load_ahrens_five_triple_campaign()
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get('configuration') != settings:
+        raise ValueError('Saved comparison configuration changed.')
+    results = pd.read_csv(results_path)
+    if set(results.fit_id) != set(manifest['fit_ids']):
+        raise ValueError('Saved subject table omits campaign fits.')
+    seed_tables = []
+    summaries = []
+    pending = []
+    try:
+        for code in settings['paths']:
+            reference = tuple(settings['triples'][code])
+            selected = results.loc[
+                results.reference_triple == code
+            ]
+            seed, summary = summarize_triple_subjects(
+                selected, reference,
+            )
+            for table in (seed, summary):
+                table.insert(0, 'reference_triple', code)
+            seed_tables.append(seed)
+            summaries.append(summary)
+            folder = output / f'triple_{code}'
+            if not folder.is_dir():
+                raise FileNotFoundError(
+                    f'Missing completed comparison folder: {folder}.'
+                )
+            for metric in ('score', 'mse'):
+                destination = (
+                    folder / f'per_subject_{metric}{FIGURE_SUFFIX}'
+                )
+                temporary = (
+                    folder /
+                    f'.per_subject_{metric}.pending{FIGURE_SUFFIX}'
+                )
+                plot_triple_subjects(
+                    summary, reference, metric, temporary,
+                )
+                pending.append((temporary, destination))
+        for name, tables in (
+            ('per_subject_within_seed', seed_tables),
+            ('per_subject_summary', summaries),
+        ):
+            write_table(
+                pd.concat(tables, ignore_index=True),
+                output / f'{name}.csv',
+            )
+        for temporary, destination in pending:
+            os.replace(temporary, destination)
+    finally:
+        for temporary, _ in pending:
+            temporary.unlink(missing_ok=True)
+    print(f'Saved per-subject comparison figures: {output.resolve()}')
+    return output
