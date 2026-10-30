@@ -1,0 +1,14 @@
+{
+  "filter": "lowpass",
+  "model": "MLPIdentityFiLM",
+  "seeds": 3,
+  "max_batch": 10000,
+  "reference_triples": [
+    "A",
+    "B"
+  ],
+  "identity_embedding_dim": 128,
+  "conditioning_dim": 1024,
+  "conditioning_layers": 1,
+  "output_projection_scope": "session"
+}

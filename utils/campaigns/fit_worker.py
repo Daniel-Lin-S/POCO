@@ -32,6 +32,7 @@ PLOTTED_CAMPAIGNS = {
     'ahrens_input_projection_scaling',
     'ahrens_local_mlp_scaling',
     'ahrens_five_triple_scaling',
+    'ahrens_identity_film_scaling',
 }
 
 

@@ -1259,3 +1259,47 @@ def ahrens_five_triple_scaling() -> dict:
                 for config in items:
                     result[seed][fit_id(config)] = config
     return {seed: list(items.values()) for seed, items in result.items()}
+
+
+def ahrens_identity_film_scaling() -> dict:
+    """Resolve identity-FiLM fits on two established Ahrens triples.
+
+    Returns
+    -------
+    dict
+        Unique resolved fits grouped by seed.
+    """
+    from configs.campaigns.ahrens_head_sharing import (
+        five_triple_groups, load_ahrens_five_triple_campaign,
+        load_ahrens_identity_film_campaign,
+    )
+    from utils.artifacts import fit_id
+
+    settings = load_ahrens_identity_film_campaign()
+    parent = load_ahrens_five_triple_campaign()
+    groups = {}
+    for reference in settings['reference_triples']:
+        for group in five_triple_groups(parent, reference):
+            groups[tuple(group)] = group
+    subjects = [
+        subject for code in settings['reference_triples']
+        for subject in parent['triples'][code]
+    ]
+    result = {seed: {} for seed in range(settings['seeds'])}
+    policy = {
+        'identity_embedding_dim': [settings['identity_embedding_dim']],
+        'conditioning_dim': [settings['conditioning_dim']],
+        'conditioning_layers': [settings['conditioning_layers']],
+        'output_projection_scope': [settings['output_projection_scope']],
+    }
+    for group in list(groups.values()) + [[s] for s in subjects]:
+        label = f"zebrafishahrens_pc-{'+'.join(group)}"
+        resolved = _resolve_ahrens_sharing(
+            settings, 'ahrens_identity_film_scaling',
+            [label], policy,
+        )
+        for seed, configs in resolved.items():
+            for config in configs:
+                result[seed][fit_id(config)] = config
+    return {seed: list(rows.values())
+            for seed, rows in result.items()}

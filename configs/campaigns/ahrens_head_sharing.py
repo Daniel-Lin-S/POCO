@@ -303,3 +303,44 @@ def five_triple_groups(settings: dict, reference: str) -> list[list[str]]:
         subject for code in group
         for subject in settings['triples'][code]
     ]) for group in codes]
+
+
+def load_ahrens_identity_film_campaign() -> dict:
+    """Validate two-triple local MLP with identity FiLM settings.
+
+    Returns
+    -------
+    dict
+        Scientific model settings and selected reference triple codes.
+    """
+    path = CAMPAIGN_DIR / 'ahrens_identity_film.json'
+    settings = json.loads(path.read_text())
+    required = {
+        'filter', 'model', 'seeds', 'max_batch',
+        'reference_triples', 'identity_embedding_dim',
+        'conditioning_dim', 'conditioning_layers',
+        'output_projection_scope',
+    }
+    expected = {
+        'filter': 'lowpass',
+        'model': 'MLPIdentityFiLM',
+        'seeds': EXPECTED_SEEDS,
+        'max_batch': EXPECTED_STEPS,
+        'reference_triples': ['A', 'B'],
+        'identity_embedding_dim': 128,
+        'conditioning_dim': 1024,
+        'conditioning_layers': 1,
+        'output_projection_scope': 'session',
+    }
+    if (set(settings) != required or
+            any(settings[key] != value
+                for key, value in expected.items())):
+        raise ValueError(
+            f'Expected established two-triple identity FiLM '
+            f'settings in {path}.'
+        )
+    parent = load_ahrens_five_triple_campaign()
+    for code in settings['reference_triples']:
+        if code not in parent['paths']:
+            raise ValueError(f'Missing Ahrens triple {code}.')
+    return settings
