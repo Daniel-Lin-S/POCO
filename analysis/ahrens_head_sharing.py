@@ -1633,6 +1633,192 @@ def analyze_ahrens_local_mlp_scaling() -> Path:
     return output
 
 
+def summarize_triple_subjects(
+    results: pd.DataFrame, reference: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Average composition paths within seed, then summarize seeds.
+
+    Parameters
+    ----------
+    results : pandas.DataFrame
+        One subject, phase, model, fit, and seed per row.
+    reference : tuple[str, ...]
+        Three fixed evaluation subjects.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Seed means and three-seed means with SEM for score and MSE.
+    """
+    keys = [
+        'subject', 'phase', 'policy', 'sessions_per_fit', 'seed'
+    ]
+    expected_policies = {
+        'full', 'local_mlp', 'independent',
+        'local_mlp_independent',
+    }
+    if (results.empty or set(results.subject) != set(reference) or
+            set(results.phase) != {'val', 'test'} or
+            set(results.policy) != expected_policies):
+        raise ValueError('Incomplete fixed-subject comparison rows.')
+    counts = results.groupby(keys).size()
+    for (subject, phase, policy, size, seed), count in counts.items():
+        expected = 1 if size in (1, 3, 18) else 3
+        if count != expected:
+            raise ValueError(
+                f'Expected {expected} groups for {subject}, {phase}, '
+                f'{policy}, size {size}, seed {seed}; got {count}.'
+            )
+    seed_means = results.groupby(keys, as_index=False)[
+        ['score', 'mse']
+    ].mean()
+    expected_keys = {
+        (subject, phase, policy, size, seed)
+        for subject in reference
+        for phase in ('val', 'test')
+        for policy in ('full', 'local_mlp')
+        for size in SIZES
+        for seed in range(SEED_COUNT)
+    } | {
+        (subject, phase, policy, 1, seed)
+        for subject in reference
+        for phase in ('val', 'test')
+        for policy in ('independent', 'local_mlp_independent')
+        for seed in range(SEED_COUNT)
+    }
+    observed = set(seed_means[keys].itertuples(
+        index=False, name=None
+    ))
+    if observed != expected_keys:
+        raise ValueError(
+            f'Incomplete subject, policy, size, seed grid: '
+            f'{len(expected_keys ^ observed)} missing or extra rows.'
+        )
+    summary = seed_means.groupby(keys[:-1])[
+        ['score', 'mse']
+    ].agg(['mean', 'std', 'count'])
+    if (summary.xs('count', axis=1, level=1) !=
+            SEED_COUNT).any().any():
+        raise ValueError('Expected three seeds per subject cell.')
+    means = summary.xs('mean', axis=1, level=1)
+    sem = (
+        summary.xs('std', axis=1, level=1) /
+        np.sqrt(SEED_COUNT)
+    )
+    summarized = means.reset_index()
+    for metric in ('score', 'mse'):
+        summarized[f'{metric}_sem'] = sem[metric].to_numpy()
+    for table in (seed_means, summarized):
+        values = table.select_dtypes(include='number').to_numpy()
+        if not np.isfinite(values).all():
+            raise ValueError('Non-finite per-subject summary.')
+    return seed_means, summarized
+
+
+def plot_triple_subjects(
+    summary: pd.DataFrame, reference: tuple[str, ...],
+    metric: str, path: Path,
+) -> None:
+    """Plot the three fixed subjects with independent model references.
+
+    Parameters
+    ----------
+    summary : pandas.DataFrame
+        Subject score/MSE means and seed SEM.
+    reference : tuple[str, ...]
+        Three subjects in the figure.
+    metric : str
+        Test score or test MSE.
+    path : pathlib.Path
+        Absolute configured-format figure path.
+    """
+    if metric not in ('score', 'mse') or not path.is_absolute():
+        raise ValueError(
+            f'Invalid subject plot metric or path: '
+            f'{metric}, {path}.'
+        )
+    fig, axes = plt.subplots(1, len(reference), figsize=(19, 7))
+    styles = (
+        ('full', 'POCO', SHARED_COLOR, '-'),
+        ('local_mlp', 'Local MLP', PRIVATE_COLOR, '--'),
+    )
+    controls = (
+        ('independent', 'Independent POCO', '#555555', ':'),
+        ('local_mlp_independent', 'Independent local MLP',
+         '#999999', '-.'),
+    )
+    handles = []
+    labels = []
+    for axis, subject in zip(axes, reference):
+        rows = summary.loc[
+            (summary.subject == subject) &
+            (summary.phase == 'test')
+        ]
+        for policy, label, color, line_type in styles:
+            values = rows.loc[
+                rows.policy == policy
+            ].sort_values('sessions_per_fit')
+            if values.sessions_per_fit.tolist() != list(SIZES):
+                raise ValueError(
+                    f'Missing test values for {subject}, '
+                    f'{policy}.'
+                )
+            x = values.sessions_per_fit.to_numpy()
+            line = sns.lineplot(
+                x=x, y=values[metric].to_numpy(),
+                ax=axis, color=color, linestyle=line_type,
+                linewidth=3.1, marker='o', markersize=8,
+                estimator=None,
+            ).lines[-1]
+            axis.errorbar(
+                x, values[metric].to_numpy(),
+                yerr=values[f'{metric}_sem'].to_numpy(),
+                fmt='none', ecolor=color, capsize=4,
+                linewidth=1.8,
+            )
+            if axis is axes[0]:
+                handles.append(line)
+                labels.append(label)
+        for policy, label, color, line_type in controls:
+            values = rows.loc[rows.policy == policy]
+            if len(values) != 1:
+                raise ValueError(
+                    f'Expected one independent {policy} value for {subject}.'
+                )
+            level = float(values[metric].iloc[0])
+            error = float(values[f'{metric}_sem'].iloc[0])
+            line = axis.axhline(
+                level, color=color, linestyle=line_type,
+                linewidth=2.4,
+            )
+            axis.axhspan(
+                level - error, level + error,
+                color=color, alpha=0.07,
+            )
+            if axis is axes[0]:
+                handles.append(line)
+                labels.append(label)
+        axis.set_title(
+            subject.replace('_', ' '), fontsize=PANEL_FONT,
+        )
+        axis.set_xticks(SIZES)
+        axis.set_xlim(2, 19)
+        axis.set_xlabel('Training sessions', fontsize=LABEL_FONT)
+        axis.set_ylabel(
+            'Test score' if metric == 'score' else 'Test MSE',
+            fontsize=LABEL_FONT,
+        )
+        axis.tick_params(labelsize=TICK_FONT)
+        sns.despine(ax=axis)
+    names = ', '.join(x.removeprefix('subject_') for x in reference)
+    title = (
+        f'Fixed-reference test by subject: {names}\n'
+        'Group means within seed; three-seed mean ± SEM'
+    )
+    save_diagnostic(
+        fig, path, title, handles, labels, legend_columns=2,
+    )
+
 def analyze_ahrens_five_triples() -> Path:
     """Publish fixed-triple figures after every required fit validates.
 
@@ -1659,6 +1845,8 @@ def analyze_ahrens_five_triples() -> Path:
     output = Path(FIG_DIR) / 'ahrens_five_triple_scaling'
     tables = []
     subject_tables = []
+    subject_seed_tables = []
+    subject_summaries = []
     seed_tables = []
     summaries = []
     prepared = []
@@ -1700,19 +1888,29 @@ def analyze_ahrens_five_triples() -> Path:
             errors.append(per_subject)
         fit_table = pd.concat(fits, ignore_index=True)
         subject_table = pd.concat(errors, ignore_index=True)
+        subject_seed, subject_summary = summarize_triple_subjects(
+            subject_table, reference,
+        )
         seed_table, summary = summarize_input_projection(
             fit_table, subject_table,
             group_policies=('full', 'local_mlp'),
             baseline_policies=('independent', 'local_mlp_independent'),
             reference=reference,
         )
-        for table in (fit_table, subject_table, seed_table, summary):
+        for table in (
+            fit_table, subject_table, subject_seed,
+            subject_summary, seed_table, summary,
+        ):
             table.insert(0, 'reference_triple', code)
         tables.append(fit_table)
         subject_tables.append(subject_table)
+        subject_seed_tables.append(subject_seed)
+        subject_summaries.append(subject_summary)
         seed_tables.append(seed_table)
         summaries.append(summary)
-        prepared.append((code, reference, summary))
+        prepared.append((
+            code, reference, summary, subject_summary,
+        ))
     resources = pd.concat(tables, ignore_index=True).drop_duplicates(
         'fit_id'
     ).set_index('fit_id')
@@ -1734,7 +1932,7 @@ def analyze_ahrens_five_triples() -> Path:
         ('local_mlp_independent', 'Independent local MLP', '-.'),
     )
     sns.set_theme(style='ticks', context='talk')
-    for code, reference, summary in prepared:
+    for code, reference, summary, subject_summary in prepared:
         folder = output / f'triple_{code}'
         folder.mkdir(exist_ok=True)
         subjects = ', '.join(s.removeprefix('subject_') for s in reference)
@@ -1747,8 +1945,15 @@ def analyze_ahrens_five_triples() -> Path:
                 summary, metric, folder / f'{name}{FIGURE_SUFFIX}',
                 styles=styles, baselines=baselines_style, title=title,
             )
+        for metric in ('score', 'mse'):
+            plot_triple_subjects(
+                subject_summary, reference, metric,
+                folder / f'per_subject_{metric}{FIGURE_SUFFIX}',
+            )
     for name, collection in (
         ('per_fit', tables), ('per_subject', subject_tables),
+        ('per_subject_within_seed', subject_seed_tables),
+        ('per_subject_summary', subject_summaries),
         ('within_seed', seed_tables), ('summary', summaries),
     ):
         write_table(pd.concat(collection, ignore_index=True),
@@ -1763,6 +1968,10 @@ def analyze_ahrens_five_triples() -> Path:
         ),
         'test_score': 'Equal-subject persistence-normalized score.',
         'test_loss': 'Pooled exact MSE within each evaluation triple.',
+        'subject_curves': (
+            'Per-subject group means within seed, then three-seed '
+            'mean and SEM; independent controls are horizontal lines.'
+        ),
     }
     (output / 'manifest.json').write_text(
         json.dumps(manifest, indent=2) + '\n'
