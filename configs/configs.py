@@ -139,6 +139,7 @@ class SupervisedLearningBaseConfig(BaseConfig):
         self.out_weight_scope = 'shared'
         self.poco_sharing = 'full'
         self.output_projection_scope = 'shared'
+        self.identity_embedding_dim = 128
         self.freeze_conditioned_net = False
         self.decoder_context_length = None # if not None, use the last decoder_context_length steps as input to the decoder model
 

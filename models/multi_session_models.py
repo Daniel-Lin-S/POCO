@@ -21,6 +21,7 @@ from configs.configs import SupervisedLearningBaseConfig, NeuralPredictionConfig
 from models.model_utils import get_rnn, get_pretrained_model, get_rnn_from_config
 from models.layers.transformer import XcodeYtimeDecoder
 from models.poyo.poyo import POYO
+from models.poyo import Embedding
 from models.layers.normalizer import MuStdWrapper, BatchedLinear, RevIN
 from models.layers.netformer import BaseNetFormer
 from configs.config_global import DEVICE
@@ -384,6 +385,82 @@ class LatentModel(nn.Module):
     def set_mode(self, mode):
         pass
 
+class UnitSessionIdentity(nn.Module):
+    """Embed recording-local PC and session IDs without activity.
+
+    Parameters
+    ----------
+    sizes : list[int]
+        Number of PC channels in each recording.
+    dataset_indices : list[int]
+        Dataset ID for each recording.
+    num_datasets : int
+        Number of dataset labels.
+    dimension : int
+        Shared embedding width.
+
+    Forward output has shape ``(sum(batch * channels), dimension)``.
+    """
+
+    def __init__(
+        self, sizes: list[int], dataset_indices: list[int],
+        num_datasets: int, dimension: int,
+    ) -> None:
+        super().__init__()
+        if (not sizes or len(sizes) != len(dataset_indices) or
+                min(sizes) < 1 or dimension < 1):
+            raise ValueError('Identity embedding needs positive channel '
+                             'counts and a dataset ID per recording.')
+        self.sizes = sizes
+        self.dataset_indices = dataset_indices
+        self.dimension = dimension
+        self.unit_emb = Embedding(sum(sizes), dimension)
+        self.session_emb = Embedding(len(sizes), dimension)
+        self.dataset_emb = Embedding(num_datasets, dimension)
+
+    def forward(
+        self, batch_sizes: list[int], device: torch.device,
+    ) -> torch.Tensor:
+        """Return additive POCO-style unit, session, dataset embeddings.
+
+        Parameters
+        ----------
+        batch_sizes : list[int]
+            Example counts per recording.
+        device : torch.device
+            Device of the neural batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Identity vectors, shape ``(sum(batch * PCs), dimension)``.
+        """
+        if len(batch_sizes) != len(self.sizes):
+            raise ValueError(
+                f'Expected {len(self.sizes)} recording batch sizes, '
+                f'got {len(batch_sizes)}.'
+            )
+        outputs = []
+        offset = 0
+        for session, (batch, channels, dataset) in enumerate(zip(
+            batch_sizes, self.sizes, self.dataset_indices
+        )):
+            if batch < 0:
+                raise ValueError(f'Negative batch count for {session}.')
+            if batch:
+                units = torch.arange(channels, device=device) + offset
+                embedding = (
+                    self.unit_emb(units) +
+                    self.session_emb.weight[session] +
+                    self.dataset_emb.weight[dataset]
+                )
+                outputs.append(embedding.repeat(batch, 1))
+            offset += channels
+        if not outputs:
+            return self.unit_emb.weight.new_empty((0, self.dimension))
+        return torch.cat(outputs, dim=0)
+
+
 class Decoder(nn.Module):
     """
     Tokenizer + Decoder
@@ -433,6 +510,16 @@ class Decoder(nn.Module):
                 config.decoder_num_layers
             )
             self.embedding_dim = config.decoder_hidden_size * self.TC
+        elif config.decoder_type == 'Identity':
+            if config.conditioning != 'mlp':
+                raise ValueError(
+                    'Identity embeddings require MLP FiLM conditioning.'
+                )
+            self.decoder = UnitSessionIdentity(
+                input_size, self.dataset_idx, self.num_datasets,
+                config.identity_embedding_dim,
+            )
+            self.embedding_dim = config.identity_embedding_dim
         elif config.decoder_type == 'POYO':
             poyo_query_mode = config.poyo_query_mode
             self.embedding_length = 1 if poyo_query_mode == 'single' else config.pred_length
@@ -484,13 +571,19 @@ class Decoder(nn.Module):
             raise ValueError(
                 'Output projection scope must be shared or session.'
             )
+        private_output_supported = (
+            (config.decoder_type == 'MLP' and
+             config.conditioning == 'none') or
+            (config.decoder_type == 'Identity' and
+             config.conditioning == 'mlp')
+        )
         if (self.output_projection_scope == 'session' and
-                (config.decoder_type != 'MLP' or
-                 config.conditioning != 'none' or
+                (not private_output_supported or
                  config.separate_projs)):
             raise ValueError(
                 'Private output projections require an MLP decoder, '
-                'no conditioning, and separate_projs=False.'
+                'an unconditioned MLP or identity FiLM, and '
+                'separate_projs=False.'
             )
         self._private_head = (
             'session' in scopes or
@@ -515,9 +608,16 @@ class Decoder(nn.Module):
             self.conditioning_beta.weight.data.zero_()
             self.conditioning_beta.bias.data.zero_()
 
-            self.out_proj = nn.Linear(
-                config.conditioning_dim, self.linear_out_size
-            )
+            if self.output_projection_scope == 'session':
+                self.proj = nn.ModuleList([
+                    nn.Linear(config.conditioning_dim,
+                              self.linear_out_size)
+                    for _ in input_size
+                ])
+            else:
+                self.out_proj = nn.Linear(
+                    config.conditioning_dim, self.linear_out_size
+                )
             self.in_proj_scope = config.in_proj_scope
             self.alpha_weight_scope = config.alpha_weight_scope
             self.out_weight_scope = config.out_weight_scope
@@ -534,6 +634,11 @@ class Decoder(nn.Module):
                 ])
                 self.conditioning_alpha.register_parameter(
                     'weight', None
+                )
+            if (self.out_weight_scope == 'session' and
+                    self.output_projection_scope == 'session'):
+                raise ValueError(
+                    'Choose one private output projection mechanism.'
                 )
             if self.out_weight_scope == 'session':
                 self.session_out_weights = nn.ParameterList([
@@ -579,7 +684,10 @@ class Decoder(nn.Module):
                 self.in_proj.requires_grad_(False)
             self.conditioning_alpha.requires_grad_(False)
             self.conditioning_beta.requires_grad_(False)
-            self.out_proj.requires_grad_(False)
+            if self.output_projection_scope == 'session':
+                self.proj.requires_grad_(False)
+            else:
+                self.out_proj.requires_grad_(False)
             if self.alpha_weight_scope == 'session':
                 self.session_alpha_weights.requires_grad_(False)
             if self.out_weight_scope == 'session':
@@ -651,6 +759,8 @@ class Decoder(nn.Module):
                 embed = embed.reshape(embed.shape[0], -1) # sum(B * D), pred_length
                 d_list = [1 for _ in self.input_size]
 
+        elif isinstance(self.decoder, UnitSessionIdentity):
+            embed = self.decoder(bsz, x.device)
         else:
             embed = self.decoder(out) # sum(B * D), embedding_dim
 
@@ -702,7 +812,9 @@ class Decoder(nn.Module):
                         else self.in_proj
                     )
                     weights = projector(input) * alpha + beta
-                    if self.out_weight_scope == 'session':
+                    if self.output_projection_scope == 'session':
+                        pred = self.proj[i](weights)
+                    elif self.out_weight_scope == 'session':
                         pred = F.linear(
                             weights, self.session_out_weights[i],
                             self.out_proj.bias,

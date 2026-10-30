@@ -65,6 +65,7 @@ MODEL_ARCHITECTURE_FIELDS = {
     'poyo_output_mode', 'decoder_num_layers', 'decoder_num_heads',
     'poyo_unit_dropout', 'rotary_attention_tmax',
     'poyo_embedding_only', 'mlp_hidden_size', 'mlp_hidden_layers',
+    'identity_embedding_dim',
     'tsmixer_ff_dim', 'filter_embed_size', 'netformer_embed_size',
 }
 MODEL_ACTIVE_FIELDS = {
@@ -80,6 +81,7 @@ DECODER_COMMON_FIELDS = {
 DECODER_TYPE_FIELDS = {
     'Linear': set(),
     'MLP': {'decoder_hidden_size', 'mlp_hidden_layers'},
+    'Identity': {'identity_embedding_dim'},
     'Transformer': {
         'decoder_hidden_size', 'decoder_num_heads', 'decoder_num_layers',
     },
@@ -96,6 +98,7 @@ EXPOSURE_CAMPAIGNS = {
     'ahrens_input_projection_scaling',
     'ahrens_local_mlp_scaling',
     'ahrens_five_triple_scaling',
+    'ahrens_identity_film_scaling',
 }
 REQUIRED_FILES = (
     'config.json', 'progress.txt', 'test.txt', 'net_best.pth',
@@ -140,6 +143,8 @@ def active_model_fields(config: dict) -> set[str] | None:
         }
         if decoder_type == 'POYO':
             fields.add('poco_sharing')
+        if decoder_type == 'Identity':
+            fields.add('output_projection_scope')
     elif config['conditioning'] == 'none':
         if decoder_type == 'MLP':
             fields.add('output_projection_scope')

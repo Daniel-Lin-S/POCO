@@ -218,7 +218,10 @@ def configure_models(configs: dict):
                     config.rnn_rank = int(config.rnn_type[5:])
                     config.rnn_type = 'LRRNN'
                 config.tf_interval = 4
-            elif model_type in ['Linear', 'MLP', 'Transformer', 'POYO', 'POCO', 'TACO', 'UICO']:
+            elif model_type in [
+                'Linear', 'MLP', 'Transformer', 'POYO', 'POCO',
+                'TACO', 'UICO', 'MLPIdentityFiLM',
+            ]:
                 config.model_type = 'Decoder'
                 config.loss_mode = 'prediction'
                 config.decoder_type = model_type
@@ -226,7 +229,10 @@ def configure_models(configs: dict):
                 if config.compression_factor is None:
                     config.compression_factor = config.decoder_context_length if config.decoder_context_length is not None else config.seq_length - config.pred_length
 
-                if model_type == 'POCO':
+                if model_type == 'MLPIdentityFiLM':
+                    config.decoder_type = 'Identity'
+                    config.conditioning = 'mlp'
+                elif model_type == 'POCO':
                     config.conditioning = 'mlp'
                     config.decoder_type = 'POYO'
                 elif model_type == 'UICO':
